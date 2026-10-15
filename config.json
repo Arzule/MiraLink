@@ -1,0 +1,13 @@
+﻿{
+  "version": 1,
+  "camera": { "device_index": 0 },
+  "interaction": {
+    "dwell_hold_ms": 1200,
+    "blink_click_ms": 250,
+    "blink_release_ms": 300,
+    "smoothing_percent": 40
+  },
+  "ui": { "theme": "default", "font_scale": 1.0 },
+  "overlay": { "buttons": {} },
+  "tts": { "enabled": false }
+}

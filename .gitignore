@@ -1,0 +1,6 @@
+﻿venv/
+__pycache__/
+*.pyc
+calibration.json
+.env
+.vscode/
