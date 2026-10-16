@@ -1,1 +1,109 @@
-﻿/* Tema de alto contraste 1 para MiraLink. */
+/* name: Alto contraste 1: negro y amarillo */
+QWidget {
+    background-color: #000000;
+    color: #FFFFFF;
+    font-size: $FONT_BASE;
+}
+
+#card {
+    background-color: #000000;
+    border: 2px solid #FFD500;
+    border-radius: 16px;
+    padding: 16px;
+}
+
+#title {
+    font-size: $FONT_TITLE;
+    color: #FFFFFF;
+    font-weight: 700;
+}
+
+#subtitle {
+    font-size: $FONT_BASE;
+    color: #FFD500;
+}
+
+#description {
+    font-size: $FONT_BASE;
+    color: #FFD500;
+    background: transparent;
+}
+
+#valueBox, #statusBadge {
+    font-size: $FONT_BASE;
+    color: #000000;
+    background-color: #FFD500;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 2px solid #FFD500;
+}
+
+QLabel, QSlider, #card QWidget {
+    background: transparent;
+}
+
+QPushButton {
+    min-height: 48px;
+    border-radius: 12px;
+    padding: 8px 16px;
+    font-size: $FONT_BASE;
+}
+
+QPushButton[variant="primary"] {
+    background-color: #FFD500;
+    color: #000000;
+    border: 2px solid #FFD500;
+}
+
+QPushButton[variant="secondary"] {
+    background-color: #000000;
+    color: #FFD500;
+    border: 2px solid #FFD500;
+}
+
+QPushButton:focus {
+    border: 3px solid #FFD500;
+    outline: none;
+}
+
+QSlider {
+    min-height: 48px;
+}
+QSlider::groove:horizontal {
+    border: none;
+    height: 8px;
+    background: #333333;
+    border-radius: 4px;
+}
+QSlider::handle:horizontal {
+    background: #FFD500;
+    border: 2px solid #000000;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    margin: -8px 0;
+}
+
+QSpinBox {
+    min-height: 48px;
+    font-size: $FONT_BASE;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 2px solid #FFD500;
+    background-color: #000000;
+    color: #FFFFFF;
+}
+
+QComboBox {
+    min-height: 48px;
+    font-size: $FONT_BASE;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 2px solid #FFD500;
+    background-color: #000000;
+    color: #FFFFFF;
+}
+
+QComboBox:focus, QSpinBox:focus, QSlider:focus {
+    border: 3px solid #FFD500;
+}

@@ -1,1 +1,100 @@
-﻿/* Tema predeterminado para MiraLink (flat, bordes redondeados, acento #8070FF). */
+/* name: Oscuro (predeterminado) */
+QWidget {
+    background-color: #101019;
+    color: #F3F3FA;
+    font-size: $FONT_BASE;
+}
+
+#card {
+    background-color: #181829;
+    border: 1px solid #2E2E4A;
+    border-radius: 16px;
+    padding: 16px;
+}
+
+#title {
+    font-size: $FONT_TITLE;
+    color: #F3F3FA;
+    font-weight: 700;
+}
+
+#subtitle {
+    font-size: $FONT_BASE;
+    color: #A1A1BE;
+}
+
+#description {
+    font-size: $FONT_BASE;
+    color: #A1A1BE;
+    background: transparent;
+}
+
+#valueBox, #statusBadge {
+    font-size: $FONT_BASE;
+    color: #F3F3FA;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid #2E2E4A;
+    background: transparent;
+}
+
+QLabel, QSlider, #card QWidget {
+    background: transparent;
+}
+
+QPushButton {
+    min-height: 48px;
+    border-radius: 12px;
+    padding: 8px 16px;
+    font-size: $FONT_BASE;
+}
+
+QPushButton[variant="primary"] {
+    background-color: #8070FF;
+    color: #F3F3FA;
+    border: none;
+}
+
+QPushButton[variant="secondary"] {
+    background-color: transparent;
+    color: #F3F3FA;
+    border: 2px solid #8070FF;
+}
+
+QSlider {
+    min-height: 48px;
+}
+QSlider::groove:horizontal {
+    border: none;
+    height: 8px;
+    background: #2E2E4A;
+    border-radius: 4px;
+}
+QSlider::handle:horizontal {
+    background: #8070FF;
+    border: none;
+    width: 24px;
+    height: 24px;
+    border-radius: 12px;
+    margin: -8px 0;
+}
+
+QSpinBox {
+    min-height: 48px;
+    font-size: $FONT_BASE;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid #2E2E4A;
+    background-color: #181829;
+    color: #F3F3FA;
+}
+
+QComboBox {
+    min-height: 48px;
+    font-size: $FONT_BASE;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border: 1px solid #2E2E4A;
+    background-color: #181829;
+    color: #F3F3FA;
+}

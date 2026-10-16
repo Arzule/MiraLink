@@ -76,7 +76,6 @@ def check_environment():
     try:
         import win32gui
 
-        # pywin32 no siempre expone __version__; reportamos el nombre
         version = getattr(win32gui, "__version__", "disponible")
         print(f"OK win32gui {version}")
     except Exception as e:
@@ -91,5 +90,18 @@ def check_environment():
     return 1
 
 
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--config":
+        from PySide6.QtWidgets import QApplication
+        from config_ui import ConfigWindow
+
+        app = QApplication(sys.argv)
+        win = ConfigWindow()
+        win.show()
+        return app.exec()
+    else:
+        return check_environment()
+
+
 if __name__ == "__main__":
-    sys.exit(check_environment())
+    sys.exit(main())
