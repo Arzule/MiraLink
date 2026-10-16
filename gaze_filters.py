@@ -1,4 +1,4 @@
-"""Filtros puros para la mirada: One Euro, mediana corta de rasgos y zona muerta.
+"""Filtros puros para la mirada: One Euro, mediana corta de rasgos, zona muerta y radio magnético.
 
 Sin reloj propio: reciben los timestamps (segundos) de TrackingFrame, nunca asumen una tasa de
 cuadros fija. Solo numpy.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -103,6 +103,53 @@ class MedianFilter:
         if len(self._buf) == 1:
             return x.copy()
         return np.median(np.vstack(self._buf), axis=0)
+
+
+Rect = Tuple[float, float, float, float]  # (x, y, ancho, alto) en las mismas coordenadas que el cursor
+
+
+def distance_to_rect(pos: Tuple[float, float], rect: Rect) -> float:
+    """Distancia de un punto al borde de un rectángulo (0 si está dentro)."""
+    x, y, w, h = rect
+    dx = max(x - pos[0], 0.0, pos[0] - (x + w))
+    dy = max(y - pos[1], 0.0, pos[1] - (y + h))
+    return math.hypot(dx, dy)
+
+
+def snap_strength(dt: float, time_constant_s: float = 0.15) -> float:
+    """Fracción de atracción para un intervalo dt (s): 1 - exp(-dt/tau). Independiente de los fps."""
+    if dt <= 0.0:
+        return 0.0
+    if time_constant_s <= 0.0:
+        return 1.0
+    return 1.0 - math.exp(-dt / time_constant_s)
+
+
+def magnetic_snap(
+    pos: Tuple[float, float], targets: Sequence[Rect], snap_radius_px: float, strength: float
+) -> Tuple[float, float]:
+    """Radio magnético: si el cursor está a menos de `snap_radius_px` de un control (incluido dentro de
+    él), lo acerca una fracción `strength` (0..1) hacia el centro del control más cercano.
+
+    Pura y sin estado: el llamador decide `strength` por cuadro (p. ej. con snap_strength(dt)) para que
+    la atracción sea suave y no dependa de la tasa de cuadros. Sin controles, radio <= 0 o fuera del
+    radio devuelve la posición sin cambios. Pensada para los botones del overlay (etapa 5).
+    """
+    if snap_radius_px <= 0.0 or strength <= 0.0 or not targets:
+        return float(pos[0]), float(pos[1])
+    best = None
+    for rect in targets:
+        d = distance_to_rect(pos, rect)
+        if d <= snap_radius_px:
+            cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
+            center_d = math.hypot(cx - pos[0], cy - pos[1])
+            if best is None or (d, center_d) < best[0]:
+                best = ((d, center_d), (cx, cy))
+    if best is None:
+        return float(pos[0]), float(pos[1])
+    k = min(1.0, float(strength))
+    cx, cy = best[1]
+    return pos[0] + k * (cx - pos[0]), pos[1] + k * (cy - pos[1])
 
 
 def apply_deadzone(shown: Optional[Tuple[float, float]], target: Tuple[float, float], radius: float) -> Tuple[float, float]:
