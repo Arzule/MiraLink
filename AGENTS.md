@@ -174,3 +174,11 @@ Problema reportado con cámara real: desvío considerable aunque el error estima
 - Más resolución mejora la precisión del iris (más píxeles por ojo), pero MediaPipe tarda más por cuadro: más CPU y riesgo de bajar de 30 fps en equipos lentos. Compararlo grabando una sesión a cada resolución y pasándolas por el replay.
 - fps medidos siempre con los timestamps: `FpsMeter` (ventana de 2 s) rellena `TrackingFrame.fps`; `TrackingFrame.camera_info` dice qué entrega la cámara (p. ej. "1280x720 MJPG"). El modal de calibración muestra "Cámara: <resolución> · N fps" (2 veces por segundo) y avisa si bajan de 25 fps (`MIN_CAMERA_FPS`); el TrackerThread lo registra en el log cada 10 s (warning si < 25). La sesión grabada guarda `fps` por cuadro y `meta.camera` (resolución real, formato y mediana de fps).
 - Nada de esto se verificó con la cámara real: los tests usan un cv2 falso.
+
+### Parte E - ayudas de interacción (gaze_filters.py)
+- `magnetic_snap(pos, targets, snap_radius_px, strength)`: si el cursor está a menos de `snap_radius_px` del borde de un control (o dentro), lo acerca la fracción `strength` hacia el centro del control más cercano (borde más cercano; en empate, el centro más cercano). `targets` son rectángulos (x, y, ancho, alto) en las coordenadas del cursor. `snap_strength(dt, 0.15 s)` = 1 - exp(-dt/tau) da una atracción suave e independiente de los fps.
+- Solo la función pura con tests: no está conectada al CursorController ni hay clave de configuración ni UI. Al llegar el overlay (etapa 5) se añadirá `interaction.snap_radius_px` y la lista de rectángulos de los botones de MiraLink, aplicándola tras el One Euro y antes de la zona muerta.
+
+### Comandos de esta mejora
+- Grabar una sesión real: `.\venv\Scripts\python.exe main.py --record-session` (opcional `--resolution 1280x720`). Archivo en `sessions\session_<fecha>.npz`.
+- Evaluar sin cámara: `.\venv\Scripts\python.exe scripts\replay_session.py sessions\session_<fecha>.npz [--distance-cm 60] [--quick]`; con datos simulados: `--synthetic [--seed N]`.
