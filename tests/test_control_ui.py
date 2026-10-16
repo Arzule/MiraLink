@@ -531,10 +531,11 @@ class TestConfigWindowControl(Base):
 
         class Dlg(QObject):
             camera_selected = Signal(int)
+            finished = Signal(int)
             accepted_mapper = None
 
-            def exec(self):
-                return 0
+            def open(self):
+                self.finished.emit(0)
 
         win.calibration_dialog_factory = Dlg
         win.btn_calibrate.click()

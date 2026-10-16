@@ -5,3 +5,4 @@ calibration.json
 .env
 .vscode/
 models/*.task
+logs/

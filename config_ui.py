@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Optional
 
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 from config_manager import load_config, save_config
 from theme_manager import list_themes, load_theme
 
-# TODO(etapa 1)
+logger = logging.getLogger(__name__)
 
 
 class ConfigWindow(QMainWindow):
@@ -48,6 +49,8 @@ class ConfigWindow(QMainWindow):
         self._save_label_timer.timeout.connect(self._clear_save_label)
         # Fábrica del modal de calibración (los tests inyectan una con tracker falso)
         self.calibration_dialog_factory = self._default_calibration_dialog
+        self.calibration_dialog_kwargs = {}  # inyección de piezas falsas en tests de integración
+        self.calibration_dialog = None  # referencia fuerte al modal abierto
 
         self.setWindowTitle("MiraLink - Configuración")
         self.setMinimumSize(960, 720)
@@ -399,17 +402,35 @@ class ConfigWindow(QMainWindow):
     def _default_calibration_dialog(self):
         from calibration_ui import CalibrationDialog
 
-        return CalibrationDialog(self._config, parent=self)
+        return CalibrationDialog(self._config, parent=self, **self.calibration_dialog_kwargs)
 
     def _open_calibration(self):
-        """Abre el modal de calibración; recuerda la cámara elegida (se guarda con Guardar)."""
+        """Abre el modal de calibración SIN exec(), reteniendo la referencia hasta `finished`.
+
+        Con exec(), el hide() del modal al iniciar la calibración terminaba exec(), la variable local
+        se soltaba y PySide destruía el modal y la pantalla completa (ver AGENTS.md).
+        """
+        logger.info("Clic en 'Calibrar Rastreador Ocular'")
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.raise_()
+            return
         self._stop_control()  # la cámara no puede compartirse con la sesión de control
         dialog = self.calibration_dialog_factory()
         dialog.camera_selected.connect(self._on_camera_selected)
-        dialog.exec()
+        dialog.finished.connect(self._on_calibration_finished)
+        self.calibration_dialog = dialog
+        dialog.open()
+
+    def _on_calibration_finished(self, _result=None):
+        dialog, self.calibration_dialog = self.calibration_dialog, None
+        if dialog is None:
+            return
+        logger.info("Modal de calibración cerrado")
         if getattr(dialog, "accepted_mapper", None) is not None:
             self.save_label.setText("Calibración guardada")
             self._save_label_timer.start(2500)
+        if hasattr(dialog, "deleteLater"):
+            dialog.deleteLater()
 
     def _on_camera_selected(self, index):
         self._config.setdefault("camera", {})["device_index"] = int(index)
@@ -466,6 +487,8 @@ class ConfigWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Al cerrar se detienen el tracker y el control y se libera el mouse."""
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.reject()  # detiene su tracker y libera la cámara
         self._stop_control()
         super().closeEvent(event)
 

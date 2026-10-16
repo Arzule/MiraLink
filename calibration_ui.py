@@ -7,6 +7,7 @@ watchdog de cuadros y para mantener ESC.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Callable, Dict, List, Optional
@@ -35,6 +36,8 @@ from calibration import (
     save_calibration,
     screen_geometry_from_qt,
 )
+
+logger = logging.getLogger(__name__)
 
 # Colores del diseño (AGENTS.md)
 BG = QColor("#101019")
@@ -561,17 +564,26 @@ class CalibrationDialog(QDialog):
 
     # ---------------------------------------------------------------- tracker
     def _start_tracker(self):
+        """El modal es el ÚNICO dueño del tracker (y de la cámara): la pantalla completa lo reutiliza."""
         if self.tracker is not None:
             return
-        tracker = self.tracker_factory(self.current_camera_index())
-        tracker.frame_ready.connect(self._on_frame)
-        tracker.failed.connect(self._on_tracker_failed)
-        self.tracker = tracker
-        tracker.start()
+        index = self.current_camera_index()
+        logger.info("Modal: iniciando tracker (cámara %s)", index)
+        try:
+            tracker = self.tracker_factory(index)
+            tracker.frame_ready.connect(self._on_frame)
+            tracker.failed.connect(self._on_tracker_failed)
+            self.tracker = tracker
+            tracker.start()
+        except Exception as e:  # noqa: BLE001 - mensaje visible en lugar de fallar en silencio
+            logger.exception("Modal: no se pudo iniciar el tracker")
+            self.tracker = None
+            self.status_label.setText(f"No se pudo usar la cámara: {e}")
 
     def _stop_tracker(self):
         tracker, self.tracker = self.tracker, None
         if tracker is not None:
+            logger.info("Modal: deteniendo tracker")
             try:
                 tracker.frame_ready.disconnect(self._on_frame)
                 tracker.failed.disconnect(self._on_tracker_failed)
@@ -590,6 +602,7 @@ class CalibrationDialog(QDialog):
             self.calib_screen.on_frame(frame)
 
     def _on_tracker_failed(self, message: str):
+        logger.error("Modal: fallo del tracker: %s", message)
         self.status_label.setText(f"No se pudo usar la cámara: {message}")
         if self.calib_screen is not None:
             self.calib_screen.on_tracker_failed(message)
@@ -604,28 +617,54 @@ class CalibrationDialog(QDialog):
         QTimer.singleShot(0, self._start_tracker)
 
     def done(self, result):
+        logger.info("Modal: cerrando (resultado %s)", result)
         self._close_screen()
         self._stop_tracker()
         super().done(result)
 
     # ------------------------------------------------------------ calibración
     def _target_screen(self):
-        return self._screen or QGuiApplication.primaryScreen()
+        """Pantalla inyectada, o la de la ventana que abrió el modal, o la primaria."""
+        if self._screen is not None:
+            return self._screen
+        parent = self.parentWidget()
+        if parent is not None and parent.screen() is not None:
+            return parent.screen()
+        return QGuiApplication.primaryScreen()
 
     def start_calibration(self):
-        """Abre la pantalla completa de calibración (9 puntos)."""
-        screen = self._target_screen()
-        geom = screen_geometry_from_qt(screen)
-        session = CalibrationSession(geom["width"], geom["height"])
-        scr = CalibrationScreen(session, dpr=float(screen.devicePixelRatio()), clock=self.clock)
-        scr.completed.connect(self._on_completed)
-        scr.aborted.connect(self._on_aborted)
-        self.calib_screen = scr
-        self._geometry = geom
-        self.hide()
-        scr.setGeometry(screen.geometry())
-        scr.showFullScreen()
-        scr.start()
+        """Abre la pantalla completa de calibración (9 puntos) reutilizando el tracker del modal.
+
+        Requiere que el modal NO se haya abierto con exec(): ocultarlo (hide) terminaría el bucle de
+        exec() y, sin otra referencia, PySide destruiría el modal y con él la pantalla completa.
+        """
+        logger.info("Clic en 'Iniciar Calibración'")
+        try:
+            screen = self._target_screen()
+            geom = screen_geometry_from_qt(screen)
+            session = CalibrationSession(geom["width"], geom["height"])
+            scr = CalibrationScreen(session, dpr=float(screen.devicePixelRatio()), clock=self.clock)
+            scr.completed.connect(self._on_completed)
+            scr.aborted.connect(self._on_aborted)
+            self.calib_screen = scr  # referencia fuerte: vive mientras ConfigWindow retenga el modal
+            self._geometry = geom
+            self.hide()
+            scr.setGeometry(screen.geometry())
+            scr.showFullScreen()
+            scr.raise_()
+            scr.activateWindow()
+            scr.start()
+            logger.info(
+                "Pantalla de calibración mostrada en %s: visible=%s fullscreen=%s geometría=%s física=%s",
+                screen.name(), scr.isVisible(), scr.isFullScreen(), scr.geometry().getRect(), geom,
+            )
+            if self.tracker is None:
+                self._start_tracker()
+        except Exception as e:  # noqa: BLE001 - nunca fallar en silencio
+            logger.exception("No se pudo abrir la pantalla de calibración")
+            self._close_screen()
+            self.status_label.setText(f"No se pudo abrir la pantalla de calibración: {e}")
+            self.show()
 
     def _close_screen(self):
         scr, self.calib_screen = self.calib_screen, None
@@ -635,6 +674,7 @@ class CalibrationDialog(QDialog):
             scr.deleteLater()
 
     def _on_aborted(self, message: str):
+        logger.warning("Calibración interrumpida: %s", message)
         self._close_screen()
         self.status_label.setText(message)
         self.show()
@@ -642,11 +682,20 @@ class CalibrationDialog(QDialog):
     def _on_completed(self, mapper: GazeMapper):
         self._close_screen()
         error = mapper.estimated_error_px
+        logger.info("Calibración completada: %s", mapper.metrics)
         dlg = CalibrationResultDialog(error, self)
         accepted = self._result_dialog_exec(dlg)
         if accepted:
-            save_calibration(self.calibration_path, mapper, self._geometry, self.current_camera_index())
+            try:
+                save_calibration(self.calibration_path, mapper, self._geometry, self.current_camera_index())
+            except OSError as e:
+                logger.exception("No se pudo guardar calibration.json")
+                self.status_label.setText(f"No se pudo guardar la calibración: {e}")
+                self.show()
+                return
+            logger.info("calibration.json guardado en %s", self.calibration_path)
             self.accepted_mapper = mapper
             self.accept()
         else:
+            logger.info("El usuario eligió Repetir")
             self.start_calibration()
