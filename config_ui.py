@@ -471,6 +471,8 @@ class ConfigWindow(QMainWindow):
         session.failed.connect(self._on_control_failed)
         if hasattr(session, "recentered"):
             session.recentered.connect(self.control_label.setText)
+        if hasattr(session, "pose_warning"):
+            session.pose_warning.connect(self._on_pose_warning)
         ok, message = session.start()
         if not ok:
             self.control_label.setText(message)
@@ -490,6 +492,13 @@ class ConfigWindow(QMainWindow):
         _ok, message = session.recenter()
         if message:
             self.control_label.setText(message)
+
+    def _on_pose_warning(self, message: str):
+        """Deriva de la cabeza: aviso en la etiqueta de estado; al quitarse vuelve el texto normal."""
+        if message:
+            self.control_label.setText(message)
+        elif self.control_session is not None:
+            self._on_paused_changed(bool(getattr(self.control_session, "paused", False)))
 
     def _on_paused_changed(self, paused: bool):
         self.btn_control.setText("Iniciar Control del Cursor" if paused else "Pausar Control del Cursor")

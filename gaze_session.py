@@ -705,6 +705,67 @@ def model_variants() -> List[Variant]:
     return out
 
 
+def posture_report(session: "RecordedSession") -> Dict[str, object]:
+    """Distancia a la cámara, corrección automática del sesgo y deriva de la cabeza con DEFAULT_FIT."""
+    from calibration import IOD_MIN, PoseDriftMonitor
+
+    valid = session.valid_mask()
+    iod = float(np.median(session.features[valid, 6])) if valid.any() else float("nan")
+    out: Dict[str, object] = {"interocular": iod, "too_far": bool(iod < IOD_MIN), "iod_min": IOD_MIN}
+    x, y, g = robust_samples(session, "calibration")
+    if len(x) < 3:
+        return out
+    mapper = GazeMapper.from_fit_options()
+    if session.has_validation:
+        mapper.fit(x, y, g, *robust_samples(session, "validation"))
+        out["validation_px"] = mapper.metrics.get("validation_px")
+        out["validation_corrected_px"] = mapper.metrics.get("validation_corrected_px")
+        out["auto_offset"] = mapper.metrics.get("auto_offset")
+        out["auto_offset_rejected"] = bool(mapper.metrics.get("auto_offset_rejected"))
+    else:
+        mapper.fit(x, y, g)
+    # cuánto se movió la cabeza en la validación respecto a la calibración (la sesión no tiene fase de uso)
+    from calibration import POSE_COLS, pad_features
+
+    monitor = PoseDriftMonitor(np.median(pad_features(x)[:, list(POSE_COLS)], axis=0))
+    first_val = np.flatnonzero(session.stage == STAGE_CODES["validation"])
+    start = int(first_val[0]) if len(first_val) else len(session)
+    max_dev = 0.0
+    warned_at = None
+    for i in range(start, len(session)):
+        if valid[i]:
+            if monitor.update(float(session.t[i]), session.features[i]) and warned_at is None:
+                warned_at = float(session.t[i] - session.t[start])
+            dev = monitor.deviation()
+            if dev is not None:
+                max_dev = max(max_dev, float(dev.max()))
+    out["pose_max_deviation"] = max_dev  # en múltiplos de la tolerancia
+    out["drift_warning_after_s"] = warned_at
+    return out
+
+
+def format_posture_report(rep: Dict[str, object]) -> str:
+    lines = [f"Distancia: separación de ojos en la imagen {rep['interocular']:.3f} (recomendado >= {rep['iod_min']:.2f})"
+             + (" -> DEMASIADO LEJOS: el iris tiene menos píxeles y el cursor tiembla más" if rep["too_far"] else "")]
+    if rep.get("validation_px") is not None:
+        line = f"Ajuste por defecto: desvío en validación {rep['validation_px']:.0f} px sin corregir"
+        if rep.get("validation_corrected_px") is not None:
+            off = rep.get("auto_offset") or [0, 0]
+            line += (f", {rep['validation_corrected_px']:.0f} px con la corrección automática (dejando un punto fuera;"
+                     f" offset {off[0]:+.0f}, {off[1]:+.0f} px")
+            line += ", RECHAZADO por grande)" if rep.get("auto_offset_rejected") else ")"
+        lines.append(line)
+    if "pose_max_deviation" in rep:
+        warned = rep["drift_warning_after_s"]
+        lines.append(
+            f"Cabeza en la validación respecto a la calibración: desviación máxima {rep['pose_max_deviation']:.1f}x "
+            "la tolerancia; "
+            + (f"el aviso de deriva habría saltado a los {warned:.1f} s" if warned is not None else "sin aviso de deriva")
+            + " (en uso real el aviso se mide desde la pose de la validación, que es la que corrige el offset)"
+        )
+    return "\n".join(lines)
+
+
 def default_variants() -> List[Variant]:
     """Variantes que compara scripts/replay_session.py (la primera es la referencia anterior)."""
     return before_after_variants() + filter_variants(make_fit(), "mapeo nuevo + ", robust=True)
