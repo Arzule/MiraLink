@@ -68,7 +68,8 @@ def make_session_meta(
         "physical_mm": [float(physical_mm[0]), float(physical_mm[1])] if physical_mm else None,
         "camera_index": int(camera_index),
         "feature_names": list(FEATURE_NAMES),
-        "calibration_points": [list(map(float, p)) for p in session.points],
+        "calibration_points": [list(map(float, p)) for p in session.points],  # en orden de presentación
+        "calibration_order": list(getattr(session, "order", range(len(session.points)))),
         "validation_points": [list(map(float, p)) for p in session.validation],
         "settle_s": session.settle_s,
         "capture_s": session.capture_s,
@@ -442,12 +443,18 @@ def synthesize_session(
     user_kwargs: Optional[dict] = None,
     session_kwargs: Optional[dict] = None,
     max_seconds: float = 180.0,
+    order: str = "balanced",
 ) -> RecordedSession:
-    """Sesión sintética que reproduce el flujo real: la CalibrationSession decide puntos y fases."""
+    """Sesión sintética que reproduce el flujo real: la CalibrationSession decide puntos, orden y fases."""
     rng = np.random.default_rng(seed)
     user = SyntheticUser(rng, width, height, physical_mm, **(user_kwargs or {}))
     session = CalibrationSession(
-        width, height, validation=validation_points(width, height) if validation else None, **(session_kwargs or {})
+        width,
+        height,
+        validation=validation_points(width, height) if validation else None,
+        order=order,
+        rng=np.random.default_rng(seed + 1000),
+        **(session_kwargs or {}),
     )
     geometry = {"x": 0, "y": 0, "width": width, "height": height}
     rec = SessionRecorder(

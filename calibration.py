@@ -27,9 +27,10 @@ CLAMP_MARGIN = 0.25  # fracción del rango calibrado que se permite extrapolar (
 AGGREGATE_CHUNKS = 5  # "median": medianas de 5 tramos consecutivos por punto
 MAX_RECENTER_FRACTION = 0.25  # un offset mayor que esta fracción de la pantalla se rechaza
 
-# Ajuste usado por la aplicación: el de menor error de VALIDACIÓN en scripts/replay_session.py con
-# sesiones sintéticas (pendiente de confirmar con una sesión real; comparativa en AGENTS.md)
-DEFAULT_FIT = {"feature_set": "compact", "model": "quad_reduced", "alpha": "cv", "aggregate": "samples"}
+# Ajuste usado por la aplicación: el de menor error de VALIDACIÓN en la primera sesión REAL
+# (sessions/session_20261016_014305.npz: 118 px frente a 185 px de "compact"; comparativa en AGENTS.md).
+# Solo iris: no compensa movimientos de cabeza (Recentrar corrige la deriva); confirmar con más sesiones.
+DEFAULT_FIT = {"feature_set": "eyes", "model": "quad_reduced", "alpha": "cv", "aggregate": "samples"}
 
 
 class CalibrationError(Exception):
@@ -476,6 +477,35 @@ def validation_points(width: int, height: int) -> List[Tuple[float, float]]:
     return [(width * fx, height * fy) for fx, fy in VALIDATION_LAYOUT]
 
 
+# Orden de respaldo: cada tramo de 3 puntos consecutivos cubre las 3 filas y las 3 columnas
+BALANCED_ORDER = (0, 4, 8, 5, 6, 1, 7, 2, 3)
+
+
+def is_balanced_order(order) -> bool:
+    """True si cada tramo de 3 puntos consecutivos (índices de grid_points) tiene una fila y una columna distintas."""
+    for k in range(0, 9, 3):
+        chunk = order[k : k + 3]
+        if len({i // 3 for i in chunk}) != 3 or len({i % 3 for i in chunk}) != 3:
+            return False
+    return True
+
+
+def balanced_order(rng: Optional[np.random.Generator] = None) -> List[int]:
+    """Orden aleatorio de los 9 puntos con cada tramo de 3 cubriendo todas las filas y columnas.
+
+    Con el orden por filas (arriba -> abajo) un movimiento de cabeza durante la calibración quedaba
+    ligado a la altura del punto, y el mapeo aprendía "cabeza baja = mirar abajo" (sesión real del
+    2026-10-16: sesgo común de +169 px en la validación). Así la posición en el tiempo no dice la fila
+    ni la columna.
+    """
+    rng = rng if rng is not None else np.random.default_rng()
+    for _ in range(2000):
+        order = [int(i) for i in rng.permutation(9)]
+        if is_balanced_order(order):
+            return order
+    return list(BALANCED_ORDER)
+
+
 @dataclass
 class CalibrationResult:
     features: np.ndarray  # (n, d)
@@ -500,6 +530,10 @@ class CalibrationSession:
     Con `validation` (lista de puntos) la sesión sigue con una fase de validación con el mismo
     ritmo; un punto de validación sin muestras suficientes tras los reintentos se omite (no aborta).
 
+    `order="balanced"` (lo usa la aplicación) presenta los 9 puntos en un orden aleatorio balanceado
+    (balanced_order); "grid" (por defecto de la clase) los presenta por filas. `points` está en orden
+    de presentación y los grupos del resultado son índices de presentación.
+
     Con `robust` (por defecto) se descartan además los cuadros de los `post_blink_s` siguientes a un
     parpadeo y, al cerrar cada punto, los atípicos y las poses de cabeza fuera de rango
     (filter_point_samples); `min_samples` se cuenta después de filtrar.
@@ -517,8 +551,17 @@ class CalibrationSession:
         validation: Optional[List[Tuple[float, float]]] = None,
         robust: bool = True,
         post_blink_s: float = 0.15,
+        order: str = "grid",
+        rng: Optional[np.random.Generator] = None,
     ):
-        self.points = grid_points(width, height, margin)
+        grid = grid_points(width, height, margin)
+        if order == "balanced":
+            self.order = balanced_order(rng)
+        elif order == "grid":
+            self.order = list(range(len(grid)))
+        else:
+            raise ValueError(f"orden desconocido: {order}")
+        self.points = [grid[i] for i in self.order]  # en orden de presentación
         self.validation = list(validation or [])
         self.settle_s = settle_s
         self.capture_s = capture_s

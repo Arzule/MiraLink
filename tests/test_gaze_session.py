@@ -86,9 +86,11 @@ class TestRecorderAndSession(unittest.TestCase):
         val = sess.capture_mask("validation")
         self.assertEqual(set(sess.point[cal].tolist()), set(range(9)))
         self.assertEqual(set(sess.point[val].tolist()), set(range(5)))
-        grid = grid_points(W, H)
+        shown = [tuple(p) for p in sess.meta["calibration_points"]]  # orden de presentación (balanceado)
+        self.assertEqual(sorted(shown), sorted(grid_points(W, H)))
+        self.assertEqual(sorted(sess.meta["calibration_order"]), list(range(9)))
         for g in range(9):
-            self.assertTrue(np.allclose(sess.target[cal & (sess.point == g)], grid[g]))
+            self.assertTrue(np.allclose(sess.target[cal & (sess.point == g)], shown[g]))
         dt = np.diff(sess.t)
         self.assertTrue((dt > 0).all())  # timestamps crecientes
         self.assertAlmostEqual(float(np.median(dt)), 1 / 30, delta=0.005)
