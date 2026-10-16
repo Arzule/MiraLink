@@ -40,9 +40,16 @@ def describe(session) -> str:
         f"Pantalla: {session.width}x{session.height} px físicos"
         + (f", {meta['physical_mm'][0]:.0f}x{meta['physical_mm'][1]:.0f} mm" if meta.get("physical_mm") else ""),
     ]
-    cam = meta.get("camera")
-    if cam:
-        parts.append(f"Cámara: {cam}")
+    cam = meta.get("camera") or {}
+    if cam.get("info") or cam.get("image_size"):
+        size = cam.get("image_size")
+        text = cam.get("info") or (f"{size[0]}x{size[1]}" if size else "?")
+        requested = (meta.get("config") or {}).get("camera", {})
+        if requested.get("width"):
+            text += f" (pedido {requested['width']}x{requested['height']})"
+        if cam.get("fps_median"):
+            text += f", {cam['fps_median']:.1f} fps (mediana medida en el tracker)"
+        parts.append(f"Cámara: {text}")
     if meta.get("synthetic"):
         parts.append("ATENCIÓN: sesión SINTÉTICA (modelo simulado), no son datos reales.")
     return "\n".join(parts)

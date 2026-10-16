@@ -80,6 +80,7 @@ class ControlSession(QObject):
         parent=None,
         recenter_hotkey_factory: Optional[Callable[[Callable[[], None]], object]] = None,
         recenter_screen_factory: Optional[Callable[..., object]] = None,
+        camera_size_getter: Callable[[], Tuple[int, int]] = lambda: (640, 480),
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -93,6 +94,7 @@ class ControlSession(QObject):
         self._feedback_factory = feedback_factory
         self.screen_size_fn = screen_size_fn
         self.clock = clock
+        self.camera_size_getter = camera_size_getter
         # Ctrl+Alt+R real solo si el atajo de pausa también es el real (los tests nunca registran el real)
         if recenter_hotkey_factory is None and hotkey_factory is None:
             recenter_hotkey_factory = default_recenter_hotkey
@@ -190,7 +192,8 @@ class ControlSession(QObject):
             if factory is None:
                 from eye_tracker import TrackerThread
 
-                factory = TrackerThread
+                size = self.camera_size_getter()
+                factory = lambda i: TrackerThread(i, camera_size=size)  # noqa: E731
             self.tracker = factory(self.camera_index_getter())
             self.tracker.frame_ready.connect(self._on_frame)
             self.tracker.failed.connect(self._on_tracker_failed)

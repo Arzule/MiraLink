@@ -647,10 +647,30 @@ def default_camera_lister() -> List[int]:
     return list_cameras()
 
 
-def default_tracker_factory(camera_index: int):
+def default_tracker_factory(camera_index: int, camera_size=(640, 480)):
     from eye_tracker import TrackerThread
 
-    return TrackerThread(camera_index)
+    return TrackerThread(camera_index, camera_size=camera_size)
+
+
+def camera_size_from_config(config: dict):
+    cam = config.get("camera", {}) if isinstance(config, dict) else {}
+    return int(cam.get("width", 640)), int(cam.get("height", 480))
+
+
+def camera_status_text(frame) -> str:
+    """Resolución y fps medidos (con aviso si bajan de 25 fps) para el modal de calibración."""
+    from eye_tracker import MIN_CAMERA_FPS
+
+    info = frame.camera_info
+    if not info and frame.image is not None:
+        info = f"{frame.image.shape[1]}x{frame.image.shape[0]}"
+    if not frame.fps:
+        return f"Cámara: {info} · midiendo fps…" if info else "Cámara: midiendo fps…"
+    text = f"Cámara: {info} · {frame.fps:.0f} fps" if info else f"Cámara: {frame.fps:.0f} fps"
+    if frame.fps < MIN_CAMERA_FPS:
+        text += f". Menos de {MIN_CAMERA_FPS:.0f} fps: la detección puede fallar; mejora la iluminación."
+    return text
 
 
 class CalibrationDialog(QDialog):
@@ -680,7 +700,11 @@ class CalibrationDialog(QDialog):
         self.saved_sessions: List[str] = []
         self.config = config
         self.camera_lister = camera_lister
+        if tracker_factory is default_tracker_factory:
+            size = camera_size_from_config(config)
+            tracker_factory = lambda i: default_tracker_factory(i, size)  # noqa: E731
         self.tracker_factory = tracker_factory
+        self._last_camera_status = -1e9
         self.calibration_path = calibration_path or default_calibration_path()
         self._screen = screen
         self.clock = clock
@@ -714,6 +738,12 @@ class CalibrationDialog(QDialog):
 
         self.preview = CameraPreview()
         layout.addWidget(self.preview, 0, Qt.AlignHCenter)
+
+        self.camera_info_label = QLabel("")
+        self.camera_info_label.setObjectName("description")
+        self.camera_info_label.setWordWrap(True)
+        self.camera_info_label.setAccessibleName("Resolución y fps de la cámara")
+        layout.addWidget(self.camera_info_label)
 
         self.instructions = QLabel(
             "Posiciona tu rostro dentro de la guía y asegúrate de tener buena iluminación antes de comenzar."
@@ -811,6 +841,9 @@ class CalibrationDialog(QDialog):
 
     def _on_frame(self, frame):
         self.preview.on_frame(frame)
+        if abs(frame.timestamp - self._last_camera_status) >= 0.5:  # resolución y fps, 2 veces por segundo
+            self._last_camera_status = frame.timestamp
+            self.camera_info_label.setText(camera_status_text(frame))
         if self.calib_screen is not None:
             self.calib_screen.on_frame(frame)
 
