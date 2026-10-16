@@ -17,6 +17,11 @@ DEFAULT_CONFIG = {
         "blink_click_ms": 250,
         "blink_release_ms": 300,
         "smoothing_percent": 40,
+        "dwell_radius_px": 50,
+        "hold_enabled": True,
+        "blink_max_ms": 2000,
+        "freeze_after_blink_ms": 150,
+        "hold_timeout_s": 30,
     },
     "ui": {"theme": "default", "font_scale": 1.0},
     "overlay": {"buttons": {}},
@@ -92,6 +97,20 @@ def _validate_config(config):
         inter["smoothing_percent"] = _clamp(int(inter.get("smoothing_percent", DEFAULT_CONFIG["interaction"]["smoothing_percent"])), 0, 100)
     except Exception:
         inter["smoothing_percent"] = DEFAULT_CONFIG["interaction"]["smoothing_percent"]
+
+    # claves avanzadas (sin UI): enteros con clamp
+    for key, lo, hi in (
+        ("dwell_radius_px", 20, 150),
+        ("blink_max_ms", 500, 5000),
+        ("freeze_after_blink_ms", 0, 500),
+        ("hold_timeout_s", 5, 120),
+    ):
+        try:
+            inter[key] = _clamp(int(inter.get(key, DEFAULT_CONFIG["interaction"][key])), lo, hi)
+        except Exception:
+            inter[key] = DEFAULT_CONFIG["interaction"][key]
+    if not isinstance(inter.get("hold_enabled"), bool):
+        inter["hold_enabled"] = bool(DEFAULT_CONFIG["interaction"]["hold_enabled"])
 
     validated["interaction"] = inter
 

@@ -82,3 +82,24 @@ Al terminar, DETENTE y entrega el reporte. No empieces la etapa 1.
 - Antes de afirmar ausencia de errores de Qt, capturar sus mensajes (qInstallMessageHandler) incluso en modo offscreen.
 - Los popups de QComboBox tienen reglas opacas propias en cada tema (`QComboBox QAbstractItemView`, ítems de 48 px); `#card QWidget` no debe volver a alcanzarlos. En la plataforma `offscreen` Qt emite siempre "QFont::setPointSizeF ... (-0.75)" al abrir un popup (artefacto, también sin hoja de estilo), así que el test del popup corre en un subproceso con la plataforma real (tests/_popup_probe.py).
 - La tarjeta Apariencia ocupa solo una celda del grid (fila 2, columna 0) con la altura de su contenido; el espacio sobrante queda vacío bajo el pie (stretch final).
+
+## Decisiones técnicas transversales (etapas 2-4)
+- Lógica pura y testeable: BlinkDetector, extractor de rasgos, GazeMapper, máquina de estados del cursor y filtros no tocan hardware ni relojes reales; reciben timestamps inyectados. Cámara, mouse y hotkey van detrás de interfaces delgadas con versiones falsas para los tests.
+- Hilos: captura e inferencia en `eye_tracker.TrackerThread` (QThread, fábrica para no importar Qt al importar el módulo) que emite `frame_ready(TrackingFrame)` y `failed(str)`.
+- Coordenadas: mapeo mirada-pantalla en píxeles físicos (geometría del QScreen x devicePixelRatio). NO llamar SetProcessDpiAwareness tras crear QApplication (Qt 6 ya fija PerMonitorV2). Al iniciar el control comparar pyautogui.size() con la geometría física; si no coinciden, advertir y no iniciar el control real. calibration.json guarda la geometría y se invalida si cambia.
+- PyAutoGUI: FAILSAFE = False y PAUSE = 0.
+- Seguridad: atajo global Ctrl+Alt+P alterna la pausa del control (RegisterHotKey en su propio hilo). Si RegisterHotKey falla NO se permite el control real, solo --dry-run, con mensaje claro en la UI. Al pausar/cerrar/fallar se suelta siempre el botón del mouse (try/finally y atexit); auto-liberación del hold tras interaction.hold_timeout_s.
+- Flag --dry-run: el backend de mouse solo registra eventos; no mueve ni hace clic.
+- Verificación del agente: no abre la cámara, no inicia el control del cursor (ni en --dry-run), no registra el hotkey real ni ejecuta --tracker-debug; eso lo prueba el usuario.
+
+## Claves de interaction añadidas (validadas con clamp, sin UI)
+dwell_radius_px=50 (20-150), hold_enabled=true, blink_max_ms=2000 (500-5000), freeze_after_blink_ms=150 (0-500), hold_timeout_s=30 (5-120).
+
+## Etapa 2 - eye_tracker.py
+- Modelo: models/face_landmarker.task (ignorado por git), descargado con scripts/download_model.py (URL oficial float16/latest de storage.googleapis.com/mediapipe-models) o automáticamente al crear FaceTracker; sin internet lanza ModelNotFoundError con instrucciones.
+- API usada: mediapipe.tasks.python.vision.FaceLandmarker en modo VIDEO (timestamps crecientes en ms), output_face_blendshapes y output_facial_transformation_matrixes activados.
+- Vector de rasgos (FEATURE_NAMES, 9 valores): [0] right_iris_along, [1] right_iris_perp, [2] left_iris_along, [3] left_iris_perp (iris en el marco local del ojo: componente a lo largo de la línea entre esquinas, de izquierda a derecha en la imagen, y perpendicular positivo hacia abajo, ambas relativas al centro de las esquinas y divididas por el ancho del ojo), [4] nose_x, [5] nose_y (landmark 1 normalizado en el cuadro), [6] interocular (distancia entre esquinas externas 33 y 263 / ancho del cuadro; proxy de profundidad), [7] yaw, [8] pitch (radianes, de la matriz facial; 0 si no hay).
+- EAR: 6 puntos por ojo (derecho 33,160,158,133,153,144; izquierdo 362,385,387,263,373,380) en píxeles.
+- BlinkDetector: línea base = percentil 90 del EAR abierto en ventana de 5 s (mín. 15 muestras, base mínima 0.12), cierre < 0.6 x base, reapertura > 0.75 x base, usa el EAR promedio; descarta eventos < 60 ms; al perder el rostro reinicia el cierre sin evento. Los blendshapes eyeBlink se exponen en TrackingFrame.blink_score solo como dato informativo (el EAR resultó suficiente en teoría; no verificado con cámara real).
+- EyeTrackingPipeline(camera, tracker, detector, clock) une cámara -> FaceTracker -> BlinkDetector y rellena eyes_closed/blink_event/image en el TrackingFrame.
+- Depuración: `python main.py --tracker-debug` (ventana OpenCV; ESC o Q para salir).

@@ -4,3 +4,4 @@ __pycache__/
 calibration.json
 .env
 .vscode/
+models/*.task

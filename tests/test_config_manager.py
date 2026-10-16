@@ -80,3 +80,28 @@ class TestConfigManager(unittest.TestCase):
             self.assertEqual(loaded["interaction"]["blink_click_ms"], 200)
             self.assertEqual(loaded["interaction"]["blink_release_ms"], 250)
             self.assertAlmostEqual(loaded["ui"]["font_scale"], 1.5, places=2)
+
+
+class TestAdvancedInteractionKeys(unittest.TestCase):
+    def test_defaults_and_clamps(self):
+        from config_manager import _deep_merge, _validate_config
+
+        inter = DEFAULT_CONFIG["interaction"]
+        self.assertEqual(inter["dwell_radius_px"], 50)
+        self.assertTrue(inter["hold_enabled"])
+        self.assertEqual(inter["blink_max_ms"], 2000)
+        self.assertEqual(inter["freeze_after_blink_ms"], 150)
+        self.assertEqual(inter["hold_timeout_s"], 30)
+
+        low = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {"dwell_radius_px": 1, "blink_max_ms": 1, "freeze_after_blink_ms": -5, "hold_timeout_s": 0, "hold_enabled": "x"}}))
+        self.assertEqual(low["interaction"]["dwell_radius_px"], 20)
+        self.assertEqual(low["interaction"]["blink_max_ms"], 500)
+        self.assertEqual(low["interaction"]["freeze_after_blink_ms"], 0)
+        self.assertEqual(low["interaction"]["hold_timeout_s"], 5)
+        self.assertTrue(low["interaction"]["hold_enabled"])
+        high = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {"dwell_radius_px": 999, "blink_max_ms": 99999, "freeze_after_blink_ms": 999, "hold_timeout_s": 999, "hold_enabled": False}}))
+        self.assertEqual(high["interaction"]["dwell_radius_px"], 150)
+        self.assertEqual(high["interaction"]["blink_max_ms"], 5000)
+        self.assertEqual(high["interaction"]["freeze_after_blink_ms"], 500)
+        self.assertEqual(high["interaction"]["hold_timeout_s"], 120)
+        self.assertFalse(high["interaction"]["hold_enabled"])
