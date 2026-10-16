@@ -20,6 +20,7 @@ from PySide6.QtGui import QGuiApplication
 
 from calibration import (
     CalibrationError,
+    PoseDriftMonitor,
     RecenterSession,
     default_calibration_path,
     load_calibration,
@@ -61,6 +62,7 @@ class ControlSession(QObject):
     event_occurred = Signal(str)  # click, hold_start, hold_end, ...
     failed = Signal(str)
     recentered = Signal(str)  # resultado de "Recentrar" (aplicado o motivo del fallo)
+    pose_warning = Signal(str)  # aviso de deriva de la cabeza ("" = se quitó el aviso)
     _hotkey_pressed = Signal()  # el hilo del atajo emite; se atiende en el hilo de la GUI
     _recenter_pressed = Signal()
 
@@ -105,6 +107,8 @@ class ControlSession(QObject):
         self.hotkey = None
         self.recenter_hotkey = None
         self.recenter_screen = None
+        self.pose_monitor: Optional[PoseDriftMonitor] = None
+        self._pose_warning_shown = False
         self.feedback = None
         self.mouse = None
         self.running = False
@@ -184,6 +188,9 @@ class ControlSession(QObject):
                 config_getter=self.config_getter,
                 listener=self._on_controller_event,
             )
+            ref = getattr(mapper, "pose_ref", None)
+            self.pose_monitor = PoseDriftMonitor(ref) if ref is not None else None
+            self._pose_warning_shown = False
             if not self._atexit_registered:
                 atexit.register(self._atexit_release)
                 self._atexit_registered = True
@@ -277,6 +284,10 @@ class ControlSession(QObject):
         except (CalibrationError, OSError) as e:
             message += f" aplicado, pero no se pudo guardar: {e}"
         logger.info(message)
+        if self.pose_monitor is not None:  # la pose actual pasa a ser la referencia
+            self.pose_monitor.rebase()
+            if self._pose_warning_shown:
+                self._set_pose_warning("")
         self.recentered.emit(message)
 
     def _on_recenter_aborted(self, message: str):
@@ -288,6 +299,7 @@ class ControlSession(QObject):
     def _on_frame(self, frame):
         if not self.running or self.controller is None:
             return
+        self._check_pose(frame)
         if self.recenter_screen is not None:
             self.recenter_screen.on_frame(frame)  # mientras se recentra, el cursor no se mueve
             return
@@ -298,6 +310,30 @@ class ControlSession(QObject):
             return
         if self.feedback is not None:
             self.feedback.update_snapshot(snap)
+
+    def _check_pose(self, frame):
+        """Aviso de deriva: compara la pose de la cabeza con la de la calibración."""
+        monitor = self.pose_monitor
+        features = getattr(frame, "features", None)
+        if monitor is None or not getattr(frame, "face_found", False) or features is None:
+            return
+        try:
+            now = monitor.update(float(frame.timestamp), features)
+        except (TypeError, ValueError):
+            return
+        if now != self._pose_warning_shown and self.recenter_screen is None:
+            self._set_pose_warning(monitor.message() if now else "")
+
+    def _set_pose_warning(self, message: str):
+        from cursor_feedback import DRIFT_WARNING_TEXT
+
+        self._pose_warning_shown = bool(message)
+        setter = getattr(self.feedback, "set_warning", None)
+        if setter is not None:
+            setter(DRIFT_WARNING_TEXT if message else None)
+        if message:
+            logger.warning("Deriva de la cabeza: %s", message)
+        self.pose_warning.emit(message)
 
     def _on_controller_event(self, name: str, x: float, y: float):
         if self.feedback is not None:

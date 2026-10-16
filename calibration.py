@@ -30,7 +30,20 @@ MAX_RECENTER_FRACTION = 0.25  # un offset mayor que esta fracción de la pantall
 # Ajuste usado por la aplicación: el de menor error de VALIDACIÓN en la primera sesión REAL
 # (sessions/session_20261016_014305.npz: 118 px frente a 185 px de "compact"; comparativa en AGENTS.md).
 # Solo iris: no compensa movimientos de cabeza (Recentrar corrige la deriva); confirmar con más sesiones.
-DEFAULT_FIT = {"feature_set": "eyes", "model": "quad_reduced", "alpha": "cv", "aggregate": "samples"}
+DEFAULT_FIT = {
+    "feature_set": "eyes",
+    "model": "quad_reduced",
+    "alpha": "cv",
+    "aggregate": "samples",
+    "auto_offset": True,  # corrige el sesgo común con los 5 puntos de validación (3 sesiones reales: 135 -> 101 px)
+}
+
+# Pose de la cabeza vigilada para el aviso de deriva: nose_x, nose_y, yaw, pitch (índices de FEATURE_NAMES)
+POSE_COLS = (4, 5, 7, 8)
+POSE_NAMES = ("posición horizontal", "posición vertical", "giro", "inclinación")
+# Tolerancias (unidades de cada rasgo). En la sesión real 3 el pitch derivó ~0.07 rad y dio ~140 px de
+# sesgo (~2000 px/rad): 0.03 rad ~ 60 px, del orden del error residual. La nariz va normalizada en el cuadro.
+POSE_TOLERANCES = (0.025, 0.025, 0.03, 0.03)
 
 
 class CalibrationError(Exception):
@@ -173,6 +186,7 @@ class GazeMapper:
         model: str = "quad",
         aggregate: str = "samples",
         clamp: bool = True,
+        auto_offset: bool = False,
     ):
         if feature_set not in FEATURE_SETS:
             raise ValueError(f"feature_set desconocido: {feature_set}")
@@ -187,6 +201,8 @@ class GazeMapper:
         self.alpha = 0.02 if alpha == "cv" else float(alpha)  # en "cv" se reemplaza al ajustar
         self.scale_floor = float(scale_floor)  # evita amplificar ruido de rasgos casi constantes
         self.clamp = clamp
+        self.auto_offset = auto_offset  # corrige el sesgo común con los puntos de validación
+        self.pose_ref: Optional[np.ndarray] = None  # pose media de la calibración (POSE_COLS)
         self.mean: Optional[np.ndarray] = None
         self.scale: Optional[np.ndarray] = None
         self.weights: Optional[np.ndarray] = None  # (m, 2)
@@ -199,7 +215,13 @@ class GazeMapper:
     def from_fit_options(cls, options: Optional[dict] = None) -> "GazeMapper":
         opts = dict(DEFAULT_FIT)
         opts.update(options or {})
-        return cls(opts["feature_set"], opts["alpha"], model=opts["model"], aggregate=opts["aggregate"])
+        return cls(
+            opts["feature_set"],
+            opts["alpha"],
+            model=opts["model"],
+            aggregate=opts["aggregate"],
+            auto_offset=bool(opts.get("auto_offset", False)),
+        )
 
     @property
     def is_fitted(self) -> bool:
@@ -252,6 +274,7 @@ class GazeMapper:
         if not (np.isfinite(x).all() and np.isfinite(y).all()):
             raise ValueError("Las muestras contienen valores no finitos")
         n_raw = len(x)
+        self.pose_ref = np.median(x[:, list(POSE_COLS)], axis=0)
         if groups is not None:
             groups = np.asarray(groups)
             if self.aggregate == "median":
@@ -281,25 +304,53 @@ class GazeMapper:
             metrics["n_points"] = int(len(uniq))
         if val_x is not None and val_y is not None and len(val_x):
             metrics.update(self.validation_metrics(val_x, val_y, val_groups))
+            if self.auto_offset:
+                metrics.update(self._apply_validation_offset(val_x, val_y, val_groups, y))
         self.metrics = metrics
         return metrics
+
+    def _validation_errors(self, val_x, val_y, val_groups=None) -> np.ndarray:
+        """Por punto de validación: mediana de las predicciones (sin offset) - objetivo. (k, 2)."""
+        val_x = pad_features(val_x)
+        val_y = np.atleast_2d(np.asarray(val_y, dtype=float))
+        groups = np.zeros(len(val_x), dtype=int) if val_groups is None else np.asarray(val_groups)
+        pred = self.predict(val_x, apply_offset=False)
+        return np.array([np.median(pred[groups == g], axis=0) - val_y[groups == g][0] for g in np.unique(groups)])
 
     def validation_metrics(self, val_x, val_y, val_groups=None) -> Dict[str, float]:
         """Error con puntos NO usados al ajustar: por punto, |mediana de las predicciones - objetivo|."""
         val_x = pad_features(val_x)
         val_y = np.atleast_2d(np.asarray(val_y, dtype=float))
-        groups = np.zeros(len(val_x), dtype=int) if val_groups is None else np.asarray(val_groups)
         pred = self.predict(val_x, apply_offset=False)
-        per_point = []
-        for g in np.unique(groups):
-            m = groups == g
-            per_point.append(float(np.linalg.norm(np.median(pred[m], axis=0) - val_y[m][0])))
+        per_point = np.linalg.norm(self._validation_errors(val_x, val_y, val_groups), axis=1)
         return {
             "validation_px": float(np.mean(per_point)),
             "validation_max_px": float(np.max(per_point)),
             "validation_rmse_px": float(np.sqrt(np.mean(np.sum((pred - val_y) ** 2, axis=1)))),
             "validation_points": int(len(per_point)),
         }
+
+    def _apply_validation_offset(self, val_x, val_y, val_groups, cal_targets) -> Dict[str, object]:
+        """Corrección automática del sesgo común (como un "Recentrar" con los puntos de validación).
+
+        offset = -media de los errores por punto. El error que se informa es honesto: cada punto se
+        evalúa con el offset calculado con los OTROS puntos (dejando uno fuera). Necesita >= 3 puntos y
+        se rechaza si el offset supera MAX_RECENTER_FRACTION del área calibrada (algo falló).
+        """
+        errs = self._validation_errors(val_x, val_y, val_groups)
+        if len(errs) < 3:
+            return {}
+        offset = -errs.mean(axis=0)
+        loo = [np.linalg.norm(errs[i] - np.delete(errs, i, axis=0).mean(axis=0)) for i in range(len(errs))]
+        span = np.ptp(np.asarray(cal_targets, dtype=float), axis=0) / 0.8  # los puntos cubren el 80 %
+        out = {"validation_corrected_px": float(np.mean(loo)), "auto_offset": [float(offset[0]), float(offset[1])]}
+        if (np.abs(offset) > MAX_RECENTER_FRACTION * np.maximum(span, 1.0)).any():
+            out["auto_offset_rejected"] = True
+            return out
+        self.offset = offset
+        # el offset corrige la pose de la validación: el aviso de deriva se mide desde esa pose
+        self.pose_ref = np.median(pad_features(val_x)[:, list(POSE_COLS)], axis=0)
+        return out
 
     # -------------------------------------------------------------- predicción
     def predict(self, x: np.ndarray, apply_offset: bool = True) -> np.ndarray:
@@ -315,8 +366,15 @@ class GazeMapper:
         return float(out[0]), float(out[1])
 
     @property
+    def offset_from_validation(self) -> bool:
+        return "validation_corrected_px" in self.metrics and not self.metrics.get("auto_offset_rejected")
+
+    @property
     def error_source(self) -> str:
-        """De dónde sale estimated_error_px: validation (puntos nuevos), cv (dejando un punto fuera) o train."""
+        """De dónde sale estimated_error_px: validation_corrected (puntos nuevos tras corregir el sesgo
+        común, dejando uno fuera), validation (puntos nuevos), cv (dejando un punto fuera) o train."""
+        if self.offset_from_validation:
+            return "validation_corrected"
         if "validation_px" in self.metrics:
             return "validation"
         if "cv_rmse_px" in self.metrics:
@@ -325,11 +383,14 @@ class GazeMapper:
 
     @property
     def estimated_error_px(self) -> float:
-        """Error mostrado: validación con puntos nuevos si existe; si no, validación cruzada; si no, entrenamiento."""
-        for key in ("validation_px", "cv_rmse_px", "rmse_px"):
-            if key in self.metrics:
-                return float(self.metrics[key])
-        return float("inf")
+        """Error mostrado según error_source (validación corregida > validación > cruzada > entrenamiento)."""
+        key = {
+            "validation_corrected": "validation_corrected_px",
+            "validation": "validation_px",
+            "cv": "cv_rmse_px",
+            "train": "rmse_px",
+        }[self.error_source]
+        return float(self.metrics.get(key, float("inf")))
 
     # ----------------------------------------------------- serialización
     def to_dict(self, geometry: Dict[str, int], camera_index: int = 0) -> dict:
@@ -352,6 +413,7 @@ class GazeMapper:
             "z_min": None if self.z_min is None else self.z_min.tolist(),
             "z_max": None if self.z_max is None else self.z_max.tolist(),
             "offset": [float(self.offset[0]), float(self.offset[1])],
+            "pose_ref": None if self.pose_ref is None else [float(v) for v in self.pose_ref],
             "metrics": self.metrics,
         }
 
@@ -385,6 +447,10 @@ class GazeMapper:
                 mapper.z_min = np.asarray(data["z_min"], dtype=float)
                 mapper.z_max = np.asarray(data["z_max"], dtype=float)
             mapper.offset = np.asarray(data.get("offset", [0.0, 0.0]), dtype=float)
+            if data.get("pose_ref") is not None:
+                mapper.pose_ref = np.asarray(data["pose_ref"], dtype=float)
+                if mapper.pose_ref.shape != (len(POSE_COLS),) or not np.isfinite(mapper.pose_ref).all():
+                    mapper.pose_ref = None  # opcional: sin referencia solo se pierde el aviso de deriva
             mapper.metrics = dict(data.get("metrics", {}))
         except CalibrationError:
             raise
@@ -832,6 +898,77 @@ class RecenterSession:
         self.phase = PHASE_DONE
 
 
+# ------------------------------------------------------------ deriva de la pose
+class PoseDriftMonitor:
+    """Avisa cuando la cabeza se aleja de la pose de la calibración (con solo iris, eso desvía el cursor).
+
+    Compara la mediana de la última `window_s` de POSE_COLS con la referencia; si alguna componente
+    supera su tolerancia durante `hold_s` seguidos pasa a "deriva" y vuelve a normal cuando todas
+    bajan del 70 % de su tolerancia (histéresis). Timestamps inyectados, sin reloj propio.
+    """
+
+    def __init__(self, reference, tolerances=POSE_TOLERANCES, window_s: float = 1.0, hold_s: float = 2.0):
+        self.reference = np.asarray(reference, dtype=float)
+        self.tolerances = np.asarray(tolerances, dtype=float)
+        self.window_s = window_s
+        self.hold_s = hold_s
+        self.drifted = False
+        self._buf: List[Tuple[float, np.ndarray]] = []
+        self._since: Optional[float] = None
+
+    def current_pose(self) -> Optional[np.ndarray]:
+        if not self._buf:
+            return None
+        return np.median(np.vstack([p for _, p in self._buf]), axis=0)
+
+    def deviation(self) -> Optional[np.ndarray]:
+        """Desviación de la pose actual respecto a la referencia, en múltiplos de la tolerancia."""
+        pose = self.current_pose()
+        return None if pose is None else np.abs(pose - self.reference) / self.tolerances
+
+    def update(self, timestamp: float, features) -> bool:
+        """Procesa los rasgos de un cuadro con rostro. Devuelve si hay deriva."""
+        x = pad_features(features)[0]
+        pose = x[list(POSE_COLS)]
+        if not np.isfinite(pose).all():
+            return self.drifted
+        self._buf.append((float(timestamp), pose))
+        while self._buf and timestamp - self._buf[0][0] > self.window_s:
+            self._buf.pop(0)
+        dev = self.deviation()
+        if self.drifted:
+            if (dev < 0.7).all():
+                self.drifted = False
+                self._since = None
+            return self.drifted
+        if (dev > 1.0).any():
+            if self._since is None:
+                self._since = timestamp
+            if timestamp - self._since >= self.hold_s:
+                self.drifted = True
+        else:
+            self._since = None
+        return self.drifted
+
+    def rebase(self):
+        """Tras "Recentrar": la pose actual pasa a ser la referencia."""
+        pose = self.current_pose()
+        if pose is not None:
+            self.reference = pose
+        self.drifted = False
+        self._since = None
+
+    def message(self) -> str:
+        dev = self.deviation()
+        if dev is None:
+            return ""
+        parts = [name for name, d in zip(POSE_NAMES, dev) if d > 1.0] or [POSE_NAMES[int(np.argmax(dev))]]
+        return (
+            f"Tu cabeza cambió de {' y '.join(parts)} respecto a la calibración y el cursor puede desviarse: "
+            "pulsa Ctrl+Alt+R (o «Recentrar») mirando el punto central."
+        )
+
+
 # ------------------------------------------------- utilidades de interfaz
 class HoldToExit:
     """Mantener una tecla `duration_s` segundos para salir (timestamps inyectados)."""
@@ -857,7 +994,9 @@ class HoldToExit:
 
 
 # Distancia interocular (fracción del ancho del cuadro) aceptable y tolerancia de centrado
-IOD_MIN = 0.14
+# 0.21: en las sesiones reales, con 0.19 (más lejos) la señal del iris / ruido bajó de ~70 a ~33 y el
+# jitter se duplicó (26 -> 52-61 px) frente a 0.23. Por debajo se pide acercarse.
+IOD_MIN = 0.21
 IOD_MAX = 0.32
 CENTER_TOL_X = 0.15
 CENTER_TOL_Y = 0.18

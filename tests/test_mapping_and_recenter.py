@@ -127,12 +127,13 @@ class TestValidationMetrics(unittest.TestCase):
         val_t = np.repeat(np.array(validation_points(W, H)), 30, axis=0)
         val_g = np.repeat(np.arange(5), 30)
         val_x = synth_features(val_t, rng)
-        m = GazeMapper.from_fit_options()
+        m = GazeMapper.from_fit_options({"auto_offset": False})
         metrics = m.fit(x, y, groups, val_x, val_t, val_g)
         self.assertEqual(metrics["validation_points"], 5)
         self.assertEqual(m.error_source, "validation")
         self.assertEqual(m.estimated_error_px, metrics["validation_px"])
         self.assertLess(metrics["validation_px"], 90)
+        np.testing.assert_allclose(m.offset, [0.0, 0.0])
         # sin validación: validación cruzada; sin grupos: entrenamiento
         m2 = GazeMapper.from_fit_options()
         m2.fit(x, y, groups)
@@ -164,7 +165,7 @@ class TestValidationMetrics(unittest.TestCase):
         mapper = cal.fit_session(s)
         self.assertEqual((mapper.feature_set, mapper.model, mapper.aggregate), (
             DEFAULT_FIT["feature_set"], DEFAULT_FIT["model"], DEFAULT_FIT["aggregate"]))
-        self.assertEqual(mapper.error_source, "validation")
+        self.assertEqual(mapper.error_source, "validation_corrected")  # DEFAULT_FIT corrige el sesgo común
         self.assertIn("discarded_samples", mapper.metrics)
         self.assertLess(mapper.estimated_error_px, 100)
 
@@ -221,6 +222,117 @@ class TestBalancedOrderAndEyesDefault(unittest.TestCase):
             errors[fs] = m.fit(x, y, groups, val_x, val_t, val_g)["validation_px"]
         self.assertLess(errors["eyes"], errors["compact"])
         self.assertLess(errors["eyes"], 60)
+
+
+class TestAutoOffsetAndPoseDrift(unittest.TestCase):
+    def shifted_validation(self, shift_along=0.03):
+        """La cabeza/ojos derivan tras calibrar: sesgo común en todos los puntos de validación."""
+        x, y, groups, rng = make_dataset()
+        val_t = np.repeat(np.array(validation_points(W, H)), 30, axis=0)
+        val_x = synth_features(val_t, rng)
+        val_x[:, 0] += shift_along
+        val_x[:, 2] += shift_along
+        val_x[:, 8] += 0.05  # pitch distinto en la validación
+        return x, y, groups, val_x, val_t, np.repeat(np.arange(5), 30)
+
+    def test_common_bias_is_corrected_and_reported_honestly(self):
+        x, y, groups, vx, vt, vg = self.shifted_validation()
+        m = GazeMapper.from_fit_options()
+        metrics = m.fit(x, y, groups, vx, vt, vg)
+        self.assertEqual(m.error_source, "validation_corrected")
+        self.assertLess(metrics["validation_corrected_px"], metrics["validation_px"] * 0.6)
+        np.testing.assert_allclose(m.offset, metrics["auto_offset"])
+        # con el offset aplicado, la mediana de cada punto queda cerca de su objetivo
+        for p in range(5):
+            pred = np.median(m.predict(vx[vg == p]), axis=0)
+            self.assertLess(np.linalg.norm(pred - vt[vg == p][0]), metrics["validation_px"])
+        # el error informado deja un punto fuera: nunca es mejor que el error en muestra con el offset
+        in_sample = np.mean([np.linalg.norm(np.median(m.predict(vx[vg == p]), axis=0) - vt[vg == p][0])
+                             for p in range(5)])
+        self.assertGreaterEqual(metrics["validation_corrected_px"] + 1e-9, in_sample)
+        # la referencia de pose del aviso es la de la validación (la que corrige el offset)
+        self.assertAlmostEqual(m.pose_ref[3], float(np.median(vx[:, 8])), places=9)
+
+    def test_absurd_offset_is_rejected(self):
+        x, y, groups, vx, vt, vg = self.shifted_validation(shift_along=0.6)
+        m = GazeMapper.from_fit_options()
+        metrics = m.fit(x, y, groups, vx, vt, vg)
+        self.assertTrue(metrics["auto_offset_rejected"])
+        np.testing.assert_allclose(m.offset, [0.0, 0.0])
+        self.assertEqual(m.error_source, "validation")  # se muestra el error sin corregir
+
+    def test_needs_three_validation_points(self):
+        x, y, groups, vx, vt, vg = self.shifted_validation()
+        keep = vg < 2
+        m = GazeMapper.from_fit_options()
+        metrics = m.fit(x, y, groups, vx[keep], vt[keep], vg[keep])
+        self.assertNotIn("validation_corrected_px", metrics)
+        self.assertEqual(m.error_source, "validation")
+
+    def test_pose_ref_round_trip(self):
+        x, y, groups, vx, vt, vg = self.shifted_validation()
+        m = GazeMapper.from_fit_options()
+        m.fit(x, y, groups, vx, vt, vg)
+        loaded = GazeMapper.from_dict(m.to_dict(GEOM), GEOM)
+        np.testing.assert_allclose(loaded.pose_ref, m.pose_ref)
+        np.testing.assert_allclose(loaded.offset, m.offset)
+        data = m.to_dict(GEOM)
+        data["pose_ref"] = [float("nan")] * 4
+        self.assertIsNone(GazeMapper.from_dict(data, GEOM).pose_ref)  # opcional: sin aviso, pero carga
+
+    def pose_features(self, pitch=0.0, nose_y=0.5):
+        f = np.zeros(10)
+        f[4], f[5], f[8] = 0.5, nose_y, pitch
+        return f
+
+    def test_drift_monitor_needs_sustained_deviation_and_has_hysteresis(self):
+        mon = cal.PoseDriftMonitor([0.5, 0.5, 0.0, 0.0])
+        t = 0.0
+        for _ in range(60):  # quieto
+            self.assertFalse(mon.update(t, self.pose_features()))
+            t += 1 / 30
+        for _ in range(20):  # cabeceo breve (0.66 s): no avisa
+            self.assertFalse(mon.update(t, self.pose_features(pitch=0.08)))
+            t += 1 / 30
+        for _ in range(30):
+            mon.update(t, self.pose_features())
+            t += 1 / 30
+        warned_at = None
+        for _ in range(150):  # inclinación sostenida
+            if mon.update(t, self.pose_features(pitch=0.05)) and warned_at is None:
+                warned_at = t
+            t += 1 / 30
+        self.assertIsNotNone(warned_at)
+        self.assertIn("inclinación", mon.message())
+        self.assertIn("Ctrl+Alt+R", mon.message())
+        for _ in range(45):  # 0.025 rad = 0.83 x tolerancia: sigue avisando (histéresis)
+            mon.update(t, self.pose_features(pitch=0.025))
+            t += 1 / 30
+        self.assertTrue(mon.drifted)
+        for _ in range(45):
+            mon.update(t, self.pose_features(pitch=0.0))
+            t += 1 / 30
+        self.assertFalse(mon.drifted)
+
+    def test_rebase_takes_current_pose(self):
+        mon = cal.PoseDriftMonitor([0.5, 0.5, 0.0, 0.0])
+        t = 0.0
+        for _ in range(120):
+            mon.update(t, self.pose_features(nose_y=0.56))
+            t += 1 / 30
+        self.assertTrue(mon.drifted)
+        self.assertIn("posición vertical", mon.message())
+        mon.rebase()
+        self.assertFalse(mon.drifted)
+        self.assertAlmostEqual(mon.reference[1], 0.56)
+        for _ in range(120):
+            self.assertFalse(mon.update(t, self.pose_features(nose_y=0.56)))
+            t += 1 / 30
+
+    def test_real_session_numbers_are_documented_in_tolerances(self):
+        self.assertEqual(cal.POSE_TOLERANCES[3], 0.03)
+        self.assertEqual(cal.IOD_MIN, 0.21)
+        self.assertTrue(DEFAULT_FIT["auto_offset"])
 
 
 class TestRobustSamples(unittest.TestCase):
@@ -428,6 +540,11 @@ class TestResultDialogSource(QtBase):
         self.assertIn("~61 px", d.source_label.text())
         self.assertFalse(d.warning_label.isVisible())
         d.close()
+        d3 = cui.CalibrationResultDialog(74.0, source="validation_corrected", points=5, raw_px=135.0)
+        d3.show()
+        self.assertIn("corregir automáticamente el desvío común", d3.source_label.text())
+        self.assertIn("Sin corregir: ~135 px", d3.source_label.text())
+        d3.close()
         d2 = cui.CalibrationResultDialog(200, source="cv")
         d2.show()
         self.assertIn("validación cruzada", d2.source_label.text())
@@ -454,6 +571,10 @@ class FakeTracker(QObject):
 class FakeFeedback:
     def __init__(self, dpr=1.0, dry_run=False):
         self.visible = False
+        self.warnings = []
+
+    def set_warning(self, text):
+        self.warnings.append(text)
 
     def show(self):
         self.visible = True
@@ -603,11 +724,86 @@ class TestControlSessionRecenter(QtBase):
         self.assertTrue(self.recenter_keys[0].stopped)
         self.assertTrue(self.pause_keys[0].stopped)
 
+    def test_head_drift_warns_and_recenter_clears_it(self):
+        s = self.make_session()
+        warnings = []
+        s.pose_warning.connect(warnings.append)
+        self.assertTrue(s.start()[0])
+        self.assertIsNotNone(s.pose_monitor)
+        cx, cy = self.geom["width"] / 2, self.geom["height"] / 2
+
+        def tilted(t, pitch_shift):
+            f = self.gaze_frame(t, (cx, cy))
+            f.features = f.features.copy()
+            f.features[8] += pitch_shift
+            return f
+
+        t = 0.0
+        for _ in range(60):
+            self.tracker.frame_ready.emit(tilted(t, 0.0))
+            t += 1 / 30
+        self.assertEqual(warnings, [])
+        for _ in range(90):  # 3 s con la cabeza inclinada 0.06 rad
+            self.tracker.frame_ready.emit(tilted(t, 0.06))
+            t += 1 / 30
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("inclinación", warnings[0])
+        self.assertEqual(self.feedback.warnings[-1], "Recentra: Ctrl+Alt+R")
+        # Recentrar con la cabeza en la nueva pose quita el aviso y la toma como referencia
+        s.recenter()
+        while s.recenter_screen is not None and t < 20:
+            self.tracker.frame_ready.emit(tilted(t, 0.06))
+            t += 1 / 30
+        self.assertEqual(warnings[-1], "")
+        self.assertIsNone(self.feedback.warnings[-1])
+        for _ in range(90):
+            self.tracker.frame_ready.emit(tilted(t, 0.06))
+            t += 1 / 30
+        self.assertEqual(warnings[-1], "")
+        s.stop()
+
     def test_injected_pause_hotkey_never_creates_real_recenter_hotkey(self):
         s = self.make_session(with_recenter_factory=False)
         self.assertTrue(s.start()[0])
         self.assertIsNone(s.recenter_hotkey)
         s.stop()
+
+
+class TestGuidanceAndFeedbackWarning(QtBase):
+    def test_modal_guidance_asks_to_come_closer(self):
+        tr = FakeTracker()
+        dlg = cui.CalibrationDialog({"camera": {"device_index": 0}}, camera_lister=lambda: [0], tracker_factory=lambda i: tr)
+        dlg.show()
+        self.app.processEvents()
+
+        def frame(t, iod):
+            return TrackingFrame(timestamp=t, face_found=True, features=np.zeros(10), face_center=(0.5, 0.5),
+                                 interocular=iod, image=np.zeros((480, 640, 3), np.uint8))
+
+        tr.frame_ready.emit(frame(1.0, 0.188))
+        self.assertIn("Acércate", dlg.guidance_label.text())
+        self.assertIn("0.19", dlg.guidance_label.text())
+        self.assertTrue(dlg.guidance_label.accessibleName())
+        tr.frame_ready.emit(frame(2.0, 0.234))
+        self.assertEqual(dlg.guidance_label.text(), "")
+        tr.frame_ready.emit(TrackingFrame(timestamp=3.0, face_found=False, image=np.zeros((480, 640, 3), np.uint8)))
+        self.assertIn("No se detecta tu rostro", dlg.guidance_label.text())
+        dlg.reject()
+
+    def test_cursor_feedback_paints_warning(self):
+        import cursor_feedback as cf
+
+        w = cf.CursorFeedback(clock=lambda: 0.0)
+        w.show()
+        empty = w.grab().toImage()
+        w.set_warning(cf.DRIFT_WARNING_TEXT)
+        img = w.grab().toImage()
+        self.assertEqual(w.warning, "Recentra: Ctrl+Alt+R")
+        changed = sum(img.pixelColor(x, y) != empty.pixelColor(x, y) for x in range(0, 140, 4) for y in range(0, 26, 2))
+        self.assertGreater(changed, 10)  # se dibujó el aviso arriba
+        w.set_warning(None)
+        self.assertIsNone(w.warning)
+        w.close()
 
 
 class TestConfigWindowRecenter(QtBase):
@@ -628,10 +824,12 @@ class TestConfigWindowRecenter(QtBase):
             tracker_active_changed = Signal(bool)
             failed = Signal(str)
             recentered = Signal(str)
+            pose_warning = Signal(str)
 
             def __init__(self):
                 super().__init__()
                 self.running = False
+                self.paused = False
                 self.calls = 0
 
             def start(self):
@@ -654,6 +852,10 @@ class TestConfigWindowRecenter(QtBase):
         self.assertEqual(stub.calls, 1)
         stub.recentered.emit("Recentrado: desplazamiento (+10, -5) px guardado en la calibración.")
         self.assertIn("Recentrado", win.control_label.text())
+        stub.pose_warning.emit("Tu cabeza cambió de inclinación respecto a la calibración: pulsa Ctrl+Alt+R.")
+        self.assertIn("Tu cabeza cambió", win.control_label.text())
+        stub.pose_warning.emit("")  # al quitarse vuelve el texto normal del control
+        self.assertIn("Control activo", win.control_label.text())
         win.close()
 
 

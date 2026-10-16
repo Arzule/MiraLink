@@ -576,8 +576,16 @@ class RecenterScreen(QWidget):
 
 
 # ------------------------------------------------------ diálogo de resultado
-def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 0) -> str:
+def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 0, raw_px: Optional[float] = None) -> str:
     """Explica qué error se muestra al final de la calibración."""
+    if source == "validation_corrected":
+        text = (
+            f"Medido en {points} puntos de validación nuevos tras corregir automáticamente el desvío común "
+            "(cada punto se evalúa con la corrección calculada con los demás)."
+        )
+        if raw_px is not None:
+            text += f" Sin corregir: ~{int(round(raw_px))} px."
+        return text
     if source == "validation":
         text = f"Medido en {points} puntos de validación nuevos, no usados para calibrar (error real)."
         if cv_px is not None:
@@ -591,7 +599,15 @@ def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 
 class CalibrationResultDialog(QDialog):
     """"Calibración completada. Error estimado: ~N px" con Aceptar / Repetir y de dónde sale el error."""
 
-    def __init__(self, error_px: float, parent=None, source: str = "", cv_px: Optional[float] = None, points: int = 0):
+    def __init__(
+        self,
+        error_px: float,
+        parent=None,
+        source: str = "",
+        cv_px: Optional[float] = None,
+        points: int = 0,
+        raw_px: Optional[float] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Calibración completada")
         self.setModal(True)
@@ -605,7 +621,7 @@ class CalibrationResultDialog(QDialog):
         self.message_label.setWordWrap(True)
         self.message_label.setAccessibleName("Resultado de la calibración")
         layout.addWidget(self.message_label)
-        self.source_label = QLabel(error_source_text(source, cv_px, points) if source else "")
+        self.source_label = QLabel(error_source_text(source, cv_px, points, raw_px) if source else "")
         self.source_label.setObjectName("description")
         self.source_label.setWordWrap(True)
         self.source_label.setAccessibleName("Origen del error estimado")
@@ -656,6 +672,24 @@ def default_tracker_factory(camera_index: int, camera_size=(640, 480)):
 def camera_size_from_config(config: dict):
     cam = config.get("camera", {}) if isinstance(config, dict) else {}
     return int(cam.get("width", 640)), int(cam.get("height", 480))
+
+
+def guidance_text(face_ok: bool, hint: str, interocular: float) -> str:
+    """Aviso destacado del modal antes de calibrar (vacío si la posición es buena)."""
+    from calibration import IOD_MIN
+
+    if not face_ok:
+        return "No se detecta tu rostro: colócate frente a la cámara con buena luz."
+    if hint == "Acércate":
+        return (
+            f"Acércate a la cámara: tu rostro se ve pequeño (distancia entre ojos {interocular:.2f}, "
+            f"se recomienda {IOD_MIN:.2f} o más) y el cursor temblará más."
+        )
+    if hint == "Aléjate":
+        return "Aléjate un poco de la cámara: tu rostro no cabe bien en la guía."
+    if hint:
+        return "Centra tu rostro dentro de la guía."
+    return ""
 
 
 def camera_status_text(frame) -> str:
@@ -744,6 +778,13 @@ class CalibrationDialog(QDialog):
         self.camera_info_label.setWordWrap(True)
         self.camera_info_label.setAccessibleName("Resolución y fps de la cámara")
         layout.addWidget(self.camera_info_label)
+
+        self.guidance_label = QLabel("")
+        self.guidance_label.setObjectName("guidance")
+        self.guidance_label.setWordWrap(True)
+        self.guidance_label.setStyleSheet("color: #FFB020; font-weight: bold; background: transparent;")
+        self.guidance_label.setAccessibleName("Aviso de posición frente a la cámara")
+        layout.addWidget(self.guidance_label)
 
         self.instructions = QLabel(
             "Posiciona tu rostro dentro de la guía y asegúrate de tener buena iluminación antes de comenzar."
@@ -844,6 +885,7 @@ class CalibrationDialog(QDialog):
         if abs(frame.timestamp - self._last_camera_status) >= 0.5:  # resolución y fps, 2 veces por segundo
             self._last_camera_status = frame.timestamp
             self.camera_info_label.setText(camera_status_text(frame))
+            self.guidance_label.setText(guidance_text(self.preview.face_ok, self.preview.hint_text, frame.interocular))
         if self.calib_screen is not None:
             self.calib_screen.on_frame(frame)
 
@@ -981,6 +1023,7 @@ class CalibrationDialog(QDialog):
             source=mapper.error_source,
             cv_px=mapper.metrics.get("cv_rmse_px"),
             points=int(mapper.metrics.get("validation_points", 0)),
+            raw_px=mapper.metrics.get("validation_px"),
         )
         accepted = self._result_dialog_exec(dlg)
         if accepted:

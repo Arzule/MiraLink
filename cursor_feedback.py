@@ -18,6 +18,8 @@ from cursor_control import STATE_DWELL, STATE_HOLD, CursorSnapshot
 
 ACCENT = QColor("#8070FF")
 TEXT = QColor("#F3F3FA")
+WARNING = QColor("#FFB020")
+DRIFT_WARNING_TEXT = "Recentra: Ctrl+Alt+R"
 
 QUIET_BEFORE_ARC_MS = 300.0  # el arco aparece tras 300 ms de quietud
 FLASH_MS = 250.0
@@ -44,6 +46,7 @@ class CursorFeedback(QWidget):
         self._flash_start: Optional[float] = None
         self._label: Optional[str] = None
         self._label_start = 0.0
+        self.warning: Optional[str] = None  # aviso persistente junto al cursor (deriva de la cabeza)
         self.setWindowFlags(
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
@@ -96,6 +99,11 @@ class CursorFeedback(QWidget):
             self._anim.start()
         self.update()
 
+    def set_warning(self, text: Optional[str]):
+        """Muestra (o quita con None) un aviso corto y persistente en la parte superior del indicador."""
+        self.warning = text or None
+        self.update()
+
     def _on_anim(self):
         now = self.clock()
         if self._flash_start is not None and not self.flash_active(now):
@@ -141,6 +149,18 @@ class CursorFeedback(QWidget):
             p.setBrush(Qt.NoBrush)
             r = radius + 24 * t
             p.drawEllipse(c, r, r)
+        if self.warning:
+            f = QFont()
+            f.setFamilies(["Inter", "Segoe UI"])
+            f.setPointSizeF(8.0)
+            f.setBold(True)
+            p.setFont(f)
+            box = QRectF(2, 2, self.SIZE - 4, 22)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(16, 16, 25, 210))
+            p.drawRoundedRect(box, 8, 8)
+            p.setPen(WARNING)
+            p.drawText(box, Qt.AlignCenter, self.warning)
         if self._label and self.dry_run:
             f = QFont()
             f.setFamilies(["Inter", "Segoe UI"])

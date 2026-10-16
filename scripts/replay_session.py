@@ -22,7 +22,9 @@ from gaze_session import (  # noqa: E402
     default_variants,
     evaluate,
     fit_label,
+    format_posture_report,
     format_table,
+    posture_report,
     load_session,
     model_variants,
     synthesize_session,
@@ -71,6 +73,10 @@ def main(argv=None) -> int:
         print(e)
         return 1
     print(describe(session))
+    try:
+        print(format_posture_report(posture_report(session)))
+    except ValueError as e:
+        print(e)
     print()
     distance_mm = args.distance_cm * 10.0
     try:

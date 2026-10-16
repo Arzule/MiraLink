@@ -38,7 +38,7 @@ class FakeTracker(QObject):
         self.stopped = True
 
 
-def make_frame(ts, features=None, face=True, center=(0.5, 0.5), iod=0.2, closed=False):
+def make_frame(ts, features=None, face=True, center=(0.5, 0.5), iod=0.24, closed=False):
     return TrackingFrame(
         timestamp=ts,
         face_found=face,
