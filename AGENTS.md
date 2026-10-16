@@ -103,3 +103,18 @@ dwell_radius_px=50 (20-150), hold_enabled=true, blink_max_ms=2000 (500-5000), fr
 - BlinkDetector: línea base = percentil 90 del EAR abierto en ventana de 5 s (mín. 15 muestras, base mínima 0.12), cierre < 0.6 x base, reapertura > 0.75 x base, usa el EAR promedio; descarta eventos < 60 ms; al perder el rostro reinicia el cierre sin evento. Los blendshapes eyeBlink se exponen en TrackingFrame.blink_score solo como dato informativo (el EAR resultó suficiente en teoría; no verificado con cámara real).
 - EyeTrackingPipeline(camera, tracker, detector, clock) une cámara -> FaceTracker -> BlinkDetector y rellena eyes_closed/blink_event/image en el TrackingFrame.
 - Depuración: `python main.py --tracker-debug` (ventana OpenCV; ESC o Q para salir).
+
+## Mejoras futuras
+- Hallazgo de la prueba manual de --tracker-debug: la detección ocular solo funciona bien si la cámara entrega ~30 fps; si los fps bajan, la detección falla.
+  - Medir los fps reales y avisar en la UI si bajan de ~25.
+  - Pedir 30 fps con CAP_PROP_FPS y revisar la exposición automática (las webcams bajan los fps con poca luz).
+  - Hacer que la detección de parpadeos y la calibración dependan de timestamps y no de conteo de cuadros (el BlinkDetector ya usa timestamps; los umbrales de CalibrationSession son en segundos salvo min_samples=20).
+- Regla para el código nuevo: no asumir una tasa de cuadros fija; usar siempre TrackingFrame.timestamp.
+
+## Etapa 3 - calibración (calibration.py, calibration_ui.py)
+- Módulos nuevos: `calibration.py` (puro, solo numpy: GazeMapper, CalibrationSession, HoldToExit, face_guidance, save/load_calibration) y `calibration_ui.py` (Qt: CameraPreview, CalibrationScreen, CalibrationResultDialog, CalibrationDialog). `ConfigWindow.calibrate_requested` abre el modal vía `ConfigWindow.calibration_dialog_factory` (los tests inyectan un falso: NUNCA hacer clic en "Calibrar" en tests con la fábrica por defecto, abre y sondea la cámara).
+- GazeMapper: reduce el vector de 9 rasgos a 6 (`compact`: iris_along medio, iris_perp medio, nose_x, nose_y, yaw, pitch; sin interocular) o usa los 9 (`full`); normaliza (media/desv. con piso 0.02), polinomio de grado 2 (28 términos en compact) y ridge con penalización alpha*n_muestras (alpha=0.02, constante sin penalizar). Métricas: `rmse_px` (entrenamiento) y `cv_rmse_px` (dejando un punto de calibración fuera). El "error estimado" mostrado al usuario es `cv_rmse_px` (pesimista en las esquinas); advierte si > 150 px (`WARN_ERROR_PX`).
+- calibration.json (ignorado por git): version, created, camera_index, screen {x,y,width,height en píxeles físicos}, feature_set, alpha, mean, scale, weights, metrics. `load_calibration(path, geometry)` lanza CalibrationError si falta, está corrupto, tiene valores no finitos o la geometría cambió. Se guarda solo al pulsar "Aceptar".
+- CalibrationSession: cuadrícula 3x3 con márgenes 10 % (izquierda a derecha, arriba abajo), 1.0 s de asentamiento + 1.5 s de captura medidos con timestamps de TrackingFrame, descarta cuadros sin rostro u ojos cerrados, mínimo 20 muestras (único criterio por conteo), hasta 2 reintentos por punto y luego aborta con mensaje. Sin cuadros, el reloj de la pantalla la hace avanzar (watchdog 0.3 s) hasta abortar.
+- Pantalla completa: título/subtítulo/píldora centrados al 30 % de la altura, aviso ESC (mantener 1.5 s) y mini previsualización en la banda del 70 % (entre las filas de puntos 50 % y 90 %), para no tapar puntos. Los puntos se dibujan en coordenadas lógicas = físicas / devicePixelRatio.
+- Verificación visual: las capturas con la plataforma `offscreen` no tienen fuentes (texto como cuadros); para revisar texto usar un script desechable con la plataforma real.
