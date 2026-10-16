@@ -71,7 +71,10 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.mouse = FakeMouse()
         self.cfg = dict(DEFAULT_CONFIG["interaction"])
-        self.cfg["smoothing_percent"] = 0  # la mayoría de las pruebas usa el cursor sin suavizar
+        # la mayoría de las pruebas usa el cursor sin filtros (los filtros se prueban en TestFilters)
+        self.cfg["smoothing_percent"] = 0
+        self.cfg["feature_median_window"] = 1
+        self.cfg["deadzone_px"] = 0
         self.events = []
         self.ctl = CursorController(
             IdentityMapper(), self.mouse, W, H, config_getter=lambda: self.cfg,
@@ -317,16 +320,25 @@ class TestPauseAndSafety(Base):
 
 
 class TestSmoothing(Base):
+    """Suavizado exponencial anterior (filter_kind="exponential", se conserva para comparar)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ctl = CursorController(IdentityMapper(), self.mouse, W, H, config_getter=lambda: self.cfg,
+                                    filter_kind="exponential")
+
     def test_alpha_formula(self):
         for pct, alpha in ((0, 1.0), (100, 0.05), (40, 0.62)):
             self.cfg["smoothing_percent"] = pct
             self.assertAlmostEqual(self.ctl.smoothing_alpha(), alpha)
 
     def test_zero_follows_raw_gaze(self):
-        self.cfg["smoothing_percent"] = 0
-        self.ctl.update(frame(0.0, 100, 100))
-        snap = self.ctl.update(frame(1 / 30, 1000, 800))
-        self.assertEqual((snap.x, snap.y), (1000.0, 800.0))
+        for kind in ("exponential", "one_euro"):
+            ctl = CursorController(IdentityMapper(), FakeMouse(), W, H, config_getter=lambda: self.cfg, filter_kind=kind)
+            self.cfg["smoothing_percent"] = 0
+            ctl.update(frame(0.0, 100, 100))
+            snap = ctl.update(frame(1 / 30, 1000, 800))
+            self.assertEqual((snap.x, snap.y), (1000.0, 800.0), kind)
 
     def test_hundred_is_very_smooth(self):
         self.cfg["smoothing_percent"] = 100
@@ -334,19 +346,151 @@ class TestSmoothing(Base):
         snap = self.ctl.update(frame(1 / 30, 1100, 100))
         self.assertAlmostEqual(snap.x, 100 + 0.05 * 1000, places=6)
         # es temporal: con el doble de dt avanza 1 - 0.95**2
-        ctl2 = CursorController(IdentityMapper(), FakeMouse(), W, H, config_getter=lambda: self.cfg)
+        ctl2 = CursorController(IdentityMapper(), FakeMouse(), W, H, config_getter=lambda: self.cfg,
+                                filter_kind="exponential")
         ctl2.update(frame(0.0, 100, 100))
         snap2 = ctl2.update(frame(2 / 30, 1100, 100))
         self.assertAlmostEqual(snap2.x, 100 + (1 - 0.95**2) * 1000, places=6)
 
     def test_converges_to_target(self):
-        self.cfg["smoothing_percent"] = 100
-        self.ctl.update(frame(0.0, 100, 100))
+        for kind in ("exponential", "one_euro"):
+            ctl = CursorController(IdentityMapper(), FakeMouse(), W, H, config_getter=lambda: self.cfg, filter_kind=kind)
+            self.cfg["smoothing_percent"] = 100
+            ctl.update(frame(0.0, 100, 100))
+            t = 0.0
+            for _ in range(300):
+                t += 1 / 30
+                snap = ctl.update(frame(t, 1000, 600))
+            self.assertAlmostEqual(snap.x, 1000, delta=1, msg=kind)
+
+    def test_unknown_filter_rejected(self):
+        with self.assertRaises(ValueError):
+            CursorController(IdentityMapper(), FakeMouse(), W, H, filter_kind="kalman")
+
+
+class TestFilters(Base):
+    """Pipeline nuevo: mediana de rasgos -> mapeo -> One Euro -> zona muerta."""
+
+    def make(self, **cfg):
+        self.cfg.update(cfg)
+        self.mouse = FakeMouse()
+        self.ctl = CursorController(IdentityMapper(), self.mouse, W, H, config_getter=lambda: self.cfg)
+
+    def run_noise(self, seconds=3.0, noise=30.0, seed=0, x=800.0, y=500.0):
+        rng = np.random.default_rng(seed)
+        xs = []
         t = 0.0
-        for _ in range(300):
+        for _ in range(int(seconds * 30)):
+            snap = self.ctl.update(frame(t, x + rng.normal(0, noise), y + rng.normal(0, noise)))
             t += 1 / 30
-            snap = self.ctl.update(frame(t, 1000, 600))
-        self.assertAlmostEqual(snap.x, 1000, delta=1)
+            xs.append((snap.x, snap.y))
+        p = np.array(xs[30:])  # tras 1 s de estabilización
+        return float(np.sqrt(np.mean(np.sum((p - p.mean(axis=0)) ** 2, axis=1))))
+
+    def test_more_smoothing_means_less_jitter(self):
+        jitters = []
+        for pct in (0, 20, 40, 70, 100):
+            self.make(smoothing_percent=pct)
+            jitters.append(self.run_noise())
+        self.assertEqual(jitters, sorted(jitters, reverse=True), jitters)
+        self.assertLess(jitters[2], jitters[0] * 0.5)
+
+    def test_one_euro_beats_exponential_on_jitter_at_same_setting(self):
+        self.make(smoothing_percent=40)
+        euro = self.run_noise()
+        self.ctl = CursorController(IdentityMapper(), FakeMouse(), W, H, config_getter=lambda: self.cfg,
+                                    filter_kind="exponential")
+        expo = self.run_noise()
+        self.assertLess(euro, expo)
+
+    def test_fast_movement_has_little_lag_thanks_to_beta(self):
+        # salto grande: con beta el corte sube y el cursor llega pronto; sin beta tarda mucho más
+        def frames_to_90(beta):
+            self.make(smoothing_percent=70, one_euro_beta=beta)
+            t = 0.0
+            for _ in range(30):
+                self.ctl.update(frame(t, 200, 500))
+                t += 1 / 30
+            for k in range(1, 200):
+                snap = self.ctl.update(frame(t, 1200, 500))
+                t += 1 / 30
+                if snap.x >= 200 + 0.9 * 1000:
+                    return k
+            return 999
+
+        self.assertLess(frames_to_90(0.01), frames_to_90(0.0))
+        self.assertLessEqual(frames_to_90(0.01), 6)
+
+    def test_uses_timestamps_not_frame_count(self):
+        # mismo recorrido a 15 y 30 fps: posición parecida al cabo de 0.5 s
+        def pos_after(fps):
+            self.make(smoothing_percent=60)
+            t = 0.0
+            self.ctl.update(frame(t, 200, 500))
+            snap = None
+            while t < 0.5 - 1e-9:
+                t += 1 / fps
+                snap = self.ctl.update(frame(t, 600, 500))
+            return snap.x
+
+        self.assertAlmostEqual(pos_after(15), pos_after(30), delta=25)
+
+    def test_median_rejects_single_frame_spikes(self):
+        self.make(feature_median_window=3)
+        t = 0.0
+        for i in range(30):
+            x = 3000.0 if i == 15 else 800.0  # pico aislado del iris
+            snap = self.ctl.update(frame(t, x, 500))
+            t += 1 / 30
+            self.assertEqual(snap.x, 800.0)
+        moves = [e for e in self.mouse.events if e[0] == "move"]
+        self.assertEqual(len(moves), 1)
+
+    def test_median_window_one_passes_spikes(self):
+        self.make(feature_median_window=1)
+        self.ctl.update(frame(0.0, 800, 500))
+        snap = self.ctl.update(frame(1 / 30, 1500, 500))
+        self.assertEqual(snap.x, 1500.0)
+
+    def test_deadzone_blocks_small_moves(self):
+        self.make(deadzone_px=10)
+        self.ctl.update(frame(0.0, 800, 500))
+        snap = self.ctl.update(frame(1 / 30, 806, 504))  # 7.2 px < 10
+        self.assertEqual((snap.x, snap.y), (800.0, 500.0))
+        snap = self.ctl.update(frame(2 / 30, 812, 500))  # 12 px desde lo mostrado
+        self.assertEqual((snap.x, snap.y), (812.0, 500.0))
+        self.assertEqual(len([e for e in self.mouse.events if e[0] == "move"]), 2)
+
+    def test_deadzone_keeps_dwell_stable_under_jitter(self):
+        self.make(deadzone_px=6, smoothing_percent=40)
+        rng = np.random.default_rng(3)
+        t = 0.0
+        snap = None
+        for _ in range(int(1.5 * 30)):
+            snap = self.ctl.update(frame(t, 800 + rng.normal(0, 4), 500 + rng.normal(0, 4)))
+            t += 1 / 30
+        self.assertEqual(snap.state, STATE_HOLD)
+
+    def test_live_filter_settings(self):
+        self.make(smoothing_percent=100)
+        self.ctl.update(frame(0.0, 100, 100))
+        slow = self.ctl.update(frame(1 / 30, 1100, 100)).x
+        self.cfg["smoothing_percent"] = 0  # el slider se aplica en vivo
+        fast = self.ctl.update(frame(2 / 30, 1100, 100)).x
+        self.assertLess(slow, 1100)
+        self.assertEqual(fast, 1100)
+
+    def test_face_lost_resets_median(self):
+        self.make(feature_median_window=5)
+        t = 0.0
+        for _ in range(5):
+            self.ctl.update(frame(t, 300, 300))
+            t += 1 / 30
+        self.ctl.update(frame(t, 0, 0, face=False))
+        t += 1 / 30
+        self.assertEqual(len(self.ctl._median), 0)
+        snap = self.ctl.update(frame(t, 900, 700))
+        self.assertEqual((snap.x, snap.y), (900.0, 700.0))
 
     def test_clamped_to_screen_and_origin_applied(self):
         mouse = FakeMouse()
