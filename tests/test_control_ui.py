@@ -585,11 +585,13 @@ class TestConfigWindowControl(Base):
                 win.font_slider.setValue(pct)
                 win.control_label.setText("Control activo. Ctrl+Alt+P pausa en cualquier momento.")
                 self.pump()
-                for w in (win.btn_calibrate, win.btn_save, win.btn_control, win.control_label, win.save_label):
+                for w in (win.btn_calibrate, win.btn_save, win.btn_control, win.btn_recenter, win.control_label,
+                          win.save_label):
                     self.assertTrue(w.isVisible())
                     self.assertGreater(w.width(), 0)
+                self.assertGreaterEqual(win.btn_recenter.height(), 48)
                 rects = {}
-                for name in ("btn_calibrate", "btn_save", "btn_control", "control_label"):
+                for name in ("btn_calibrate", "btn_save", "btn_control", "btn_recenter", "control_label"):
                     w = getattr(win, name)
                     rects[name] = type(w.rect())(w.mapTo(win, w.rect().topLeft()), w.rect().size())
                 names = list(rects)

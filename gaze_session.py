@@ -23,11 +23,16 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from calibration import (
+    AGGREGATES,
+    DEFAULT_FIT,
+    FEATURE_SETS,
+    MODELS,
     PHASE_CAPTURING,
     PHASE_SETTLING,
     STAGE_VALIDATION,
     CalibrationSession,
     GazeMapper,
+    filter_point_samples,
     validation_points,
 )
 from config_manager import DEFAULT_CONFIG
@@ -447,19 +452,57 @@ def synthesize_session(
 # ------------------------------------------------------------------- evaluación
 def fit_baseline(x, y, groups):
     """Mapeo anterior a esta mejora: compacto, cuadrático completo, ridge alpha=0.02, todas las muestras."""
-    mapper = GazeMapper("compact", alpha=0.02)
+    mapper = GazeMapper("compact", alpha=0.02, clamp=False)
     mapper.fit(x, y, groups)
     return mapper
 
 
+def make_fit(options: Optional[dict] = None) -> Callable:
+    """Ajuste con las opciones de GazeMapper.from_fit_options (DEFAULT_FIT por defecto)."""
+
+    def fit(x, y, groups):
+        mapper = GazeMapper.from_fit_options(options)
+        mapper.fit(x, y, groups)
+        return mapper
+
+    return fit
+
+
+def post_blink_mask(t: np.ndarray, closed: np.ndarray, window_s: float = 0.15) -> np.ndarray:
+    """True en los cuadros con ojos cerrados o a menos de `window_s` de un cierre (como CalibrationSession)."""
+    out = np.zeros(len(t), dtype=bool)
+    last = None
+    for i in range(len(t)):
+        if closed[i]:
+            last = t[i]
+        out[i] = last is not None and t[i] - last < window_s
+    return out
+
+
 @dataclass
 class Variant:
-    """Una combinación de mapeo (cómo se ajusta) y filtro (claves de interaction y opciones del controlador)."""
+    """Una combinación de mapeo (cómo se ajusta) y filtro (claves de interaction y opciones del controlador).
+
+    `robust`: las muestras de calibración pasan por el mismo filtrado que CalibrationSession(robust=True)
+    (tras parpadeo, pose fuera de rango y atípicos del iris). El mapeo anterior no lo tenía.
+    """
 
     name: str
     fit: Callable[[np.ndarray, np.ndarray, np.ndarray], object] = fit_baseline
     interaction: Dict = field(default_factory=dict)
     controller_kwargs: Dict = field(default_factory=dict)
+    robust: bool = False
+
+
+def robust_samples(session: "RecordedSession", stage: str = "calibration"):
+    """Muestras de captura con el filtrado robusto de la calibración (por punto)."""
+    m = session.capture_mask(stage) & ~post_blink_mask(session.t, session.closed)
+    x, y, g = session.features[m], session.target[m], session.point[m].astype(int)
+    keep = np.zeros(len(x), dtype=bool)
+    for p in np.unique(g):
+        idx = np.flatnonzero(g == p)
+        keep[idx] = filter_point_samples(x[idx])
+    return x[keep], y[keep], g[keep]
 
 
 class _NullMouse:
@@ -563,12 +606,14 @@ def evaluate(
     session: RecordedSession, variants: Sequence[Variant], distance_mm: float = DEFAULT_DISTANCE_MM
 ) -> List[Dict[str, object]]:
     """Evalúa cada variante: ajusta con la etapa de calibración y mide en la de validación."""
-    x, y, g = session.samples("calibration")
-    if len(x) < 3:
+    plain = session.samples("calibration")
+    if len(plain[0]) < 3:
         raise ValueError("La sesión no tiene muestras de calibración suficientes")
+    robust = robust_samples(session, "calibration")
     stage = "validation" if session.has_validation else "calibration"
     rows = []
     for v in variants:
+        x, y, g = robust if v.robust else plain
         mapper = v.fit(x, y, g)
         pos = simulate_cursor(session, mapper, v.interaction, v.controller_kwargs)
         fm = fixation_metrics(session, pos, stage)
@@ -592,20 +637,52 @@ OLD_FILTER = {"feature_median_window": 1, "deadzone_px": 0}  # el pipeline anter
 EXPONENTIAL = {"filter_kind": "exponential"}
 
 
-def filter_variants(fit=fit_baseline, prefix: str = "") -> List[Variant]:
+def filter_variants(fit=fit_baseline, prefix: str = "", robust: bool = False) -> List[Variant]:
     """Mismo mapeo con los distintos filtros (parte B)."""
     return [
-        Variant(f"{prefix}exponencial (anterior)", fit, dict(OLD_FILTER), dict(EXPONENTIAL)),
-        Variant(f"{prefix}sin suavizado (referencia)", fit, dict(OLD_FILTER, smoothing_percent=0), dict(EXPONENTIAL)),
-        Variant(f"{prefix}One Euro", fit, dict(OLD_FILTER)),
-        Variant(f"{prefix}One Euro + mediana", fit, {"deadzone_px": 0}),
-        Variant(f"{prefix}One Euro + mediana + zona muerta", fit, {}),
+        Variant(f"{prefix}exponencial (anterior)", fit, dict(OLD_FILTER), dict(EXPONENTIAL), robust),
+        Variant(f"{prefix}sin suavizado (referencia)", fit, dict(OLD_FILTER, smoothing_percent=0), dict(EXPONENTIAL), robust),
+        Variant(f"{prefix}One Euro", fit, dict(OLD_FILTER), {}, robust),
+        Variant(f"{prefix}One Euro + mediana", fit, {"deadzone_px": 0}, {}, robust),
+        Variant(f"{prefix}One Euro + mediana + zona muerta", fit, {}, {}, robust),
     ]
+
+
+FIT_LABELS = {"eyes": "solo ojos", "compact": "ojos+yaw/pitch/nariz", "head": "cabeza completa", "full": "10 rasgos"}
+MODEL_LABELS = {"linear": "lineal", "quad": "cuadr. completo", "quad_reduced": "cuadr. reducido"}
+
+
+def fit_label(options: dict) -> str:
+    o = dict(DEFAULT_FIT, **options)
+    alpha = "a=CV" if o["alpha"] == "cv" else f"a={o['alpha']}"
+    agg = "mediana" if o["aggregate"] == "median" else "muestras"
+    return f"{FIT_LABELS[o['feature_set']]}, {MODEL_LABELS[o['model']]}, {alpha}, {agg}"
+
+
+def before_after_variants() -> List[Variant]:
+    """Antes (mapeo y filtro anteriores) frente a después (DEFAULT_FIT + filtrado robusto + filtro nuevo)."""
+    return [
+        Variant("ANTES: mapeo anterior + exponencial", fit_baseline, dict(OLD_FILTER), dict(EXPONENTIAL)),
+        Variant("DESPUÉS: " + fit_label({}) + " + One Euro", make_fit(), {}, {}, robust=True),
+    ]
+
+
+def model_variants() -> List[Variant]:
+    """Parte C: conjuntos de rasgos x modelos x agregación, todos con alpha por CV y el filtro nuevo."""
+    out = []
+    for fs in FEATURE_SETS:
+        for model in MODELS:
+            for agg in AGGREGATES:
+                opts = {"feature_set": fs, "model": model, "alpha": "cv", "aggregate": agg}
+                out.append(Variant(fit_label(opts), make_fit(opts), {}, {}, robust=True))
+    opts = dict(DEFAULT_FIT, alpha=0.02)
+    out.append(Variant(fit_label(opts) + " (alpha fijo)", make_fit(opts), {}, {}, robust=True))
+    return out
 
 
 def default_variants() -> List[Variant]:
     """Variantes que compara scripts/replay_session.py (la primera es la referencia anterior)."""
-    return filter_variants(fit_baseline, "mapeo anterior + ")
+    return before_after_variants() + filter_variants(make_fit(), "mapeo nuevo + ", robust=True)
 
 
 def format_table(rows: Sequence[Dict[str, object]]) -> str:

@@ -2,21 +2,50 @@
 
 Todas las piezas con hardware (hilo de cámara, mouse, hotkey, ventana de feedback) se crean con
 fábricas inyectables para poder probar la orquestación sin hardware.
+
+"Recentrar" (botón o Ctrl+Alt+R) reutiliza el mismo tracker: mientras la pantalla del punto central
+está abierta, los cuadros van a ella y el cursor no se mueve.
 """
 
 from __future__ import annotations
 
 import atexit
+import logging
 import time
 from typing import Callable, Optional, Tuple
 
+import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
-from calibration import CalibrationError, default_calibration_path, load_calibration, screen_geometry_from_qt
-from cursor_control import HOTKEY_LABEL, CursorController, DryRunMouse, PyAutoGUIMouse, Win32Hotkey
+from calibration import (
+    CalibrationError,
+    RecenterSession,
+    default_calibration_path,
+    load_calibration,
+    save_offset,
+    screen_geometry_from_qt,
+)
+from cursor_control import (
+    HOTKEY_LABEL,
+    RECENTER_HOTKEY_LABEL,
+    CursorController,
+    DryRunMouse,
+    PyAutoGUIMouse,
+    Win32Hotkey,
+    _WinHotkeyApi,
+)
+
+logger = logging.getLogger(__name__)
 
 MSG_NEEDS_CALIBRATION = "Primero calibra el rastreador"
+MSG_RECENTER_NEEDS_CONTROL = f"Inicia el control del cursor para usar Recentrar ({RECENTER_HOTKEY_LABEL})."
+
+
+def default_recenter_hotkey(callback):
+    return Win32Hotkey(
+        callback, vk=_WinHotkeyApi.VK_R, label=RECENTER_HOTKEY_LABEL, hotkey_id=_WinHotkeyApi.RECENTER_HOTKEY_ID
+    )
 
 
 def default_screen_size() -> Tuple[int, int]:
@@ -31,7 +60,9 @@ class ControlSession(QObject):
     tracker_active_changed = Signal(bool)
     event_occurred = Signal(str)  # click, hold_start, hold_end, ...
     failed = Signal(str)
+    recentered = Signal(str)  # resultado de "Recentrar" (aplicado o motivo del fallo)
     _hotkey_pressed = Signal()  # el hilo del atajo emite; se atiende en el hilo de la GUI
+    _recenter_pressed = Signal()
 
     def __init__(
         self,
@@ -47,6 +78,8 @@ class ControlSession(QObject):
         screen_size_fn: Callable[[], Tuple[int, int]] = default_screen_size,
         clock: Callable[[], float] = time.monotonic,
         parent=None,
+        recenter_hotkey_factory: Optional[Callable[[Callable[[], None]], object]] = None,
+        recenter_screen_factory: Optional[Callable[..., object]] = None,
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -60,9 +93,16 @@ class ControlSession(QObject):
         self._feedback_factory = feedback_factory
         self.screen_size_fn = screen_size_fn
         self.clock = clock
+        # Ctrl+Alt+R real solo si el atajo de pausa también es el real (los tests nunca registran el real)
+        if recenter_hotkey_factory is None and hotkey_factory is None:
+            recenter_hotkey_factory = default_recenter_hotkey
+        self._recenter_hotkey_factory = recenter_hotkey_factory
+        self._recenter_screen_factory = recenter_screen_factory
         self.tracker = None
         self.controller: Optional[CursorController] = None
         self.hotkey = None
+        self.recenter_hotkey = None
+        self.recenter_screen = None
         self.feedback = None
         self.mouse = None
         self.running = False
@@ -72,6 +112,7 @@ class ControlSession(QObject):
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._on_timer)
         self._hotkey_pressed.connect(self.toggle_pause)
+        self._recenter_pressed.connect(self._on_recenter_hotkey)
 
     # ----------------------------------------------------------- comprobaciones
     def _target_screen(self):
@@ -124,6 +165,7 @@ class ControlSession(QObject):
                     return False, f"{reason} Sin el atajo de emergencia no se permite el control real; usa --dry-run."
                 self.hotkey_warning = f"{reason} (solo simulación)"
             self.hotkey = hotkey
+            self._start_recenter_hotkey()
 
             self.mouse = (self._mouse_factory or (DryRunMouse if self.dry_run else PyAutoGUIMouse))()
             if self._feedback_factory is None:
@@ -163,9 +205,88 @@ class ControlSession(QObject):
             self.stop()
             return False, f"No se pudo iniciar el control del cursor: {e}"
 
+    def _start_recenter_hotkey(self):
+        """Ctrl+Alt+R no es de seguridad: si no se puede registrar, se avisa y queda el botón."""
+        if self._recenter_hotkey_factory is None:
+            return
+        hk = self._recenter_hotkey_factory(self._recenter_pressed.emit)
+        if hk.start():
+            self.recenter_hotkey = hk
+            return
+        hk.stop()
+        reason = getattr(hk, "error", "") or f"No se pudo registrar el atajo {RECENTER_HOTKEY_LABEL}."
+        note = f"{reason} Recentrar sigue disponible con el botón."
+        self.hotkey_warning = f"{self.hotkey_warning} {note}".strip()
+
+    # ---------------------------------------------------------------- recentrar
+    def _on_recenter_hotkey(self):
+        ok, message = self.recenter()
+        if not ok and message:
+            self.recentered.emit(message)
+
+    def recenter(self) -> Tuple[bool, str]:
+        """Muestra un punto central, recoge ~1 s de muestras con el mismo tracker y aplica un offset."""
+        if not self.running or self.controller is None:
+            return False, MSG_RECENTER_NEEDS_CONTROL
+        if self.recenter_screen is not None:
+            self.recenter_screen.raise_()
+            return True, ""
+        screen = self._target_screen()
+        geom = screen_geometry_from_qt(screen)
+        self.controller.release_all()  # un hold activo se suelta antes de recentrar
+        factory = self._recenter_screen_factory
+        if factory is None:
+            from calibration_ui import RecenterScreen
+
+            factory = RecenterScreen
+        scr = factory(RecenterSession(geom["width"], geom["height"]), self.controller.mapper, clock=self.clock)
+        scr.completed.connect(self._on_recenter_completed)
+        scr.aborted.connect(self._on_recenter_aborted)
+        self.recenter_screen = scr
+        if self.feedback is not None:
+            self.feedback.hide()
+        scr.setGeometry(screen.geometry())
+        scr.showFullScreen()
+        scr.raise_()
+        scr.activateWindow()
+        scr.start()
+        logger.info("Recentrar: pantalla mostrada")
+        return True, ""
+
+    def _close_recenter_screen(self):
+        scr, self.recenter_screen = self.recenter_screen, None
+        if scr is not None:
+            scr.stop()
+            scr.hide()
+            scr.deleteLater()
+        if self.running and self.feedback is not None:
+            self.feedback.show()
+
+    def _on_recenter_completed(self, offset):
+        self._close_recenter_screen()
+        if self.controller is None:
+            return
+        self.controller.mapper.offset = np.asarray(offset, dtype=float)
+        message = f"Recentrado: desplazamiento ({offset[0]:+.0f}, {offset[1]:+.0f}) px"
+        try:
+            save_offset(self.calibration_path, offset)
+            message += " guardado en la calibración."
+        except (CalibrationError, OSError) as e:
+            message += f" aplicado, pero no se pudo guardar: {e}"
+        logger.info(message)
+        self.recentered.emit(message)
+
+    def _on_recenter_aborted(self, message: str):
+        self._close_recenter_screen()
+        logger.warning("Recentrar: %s", message)
+        self.recentered.emit(message)
+
     # ------------------------------------------------------------------ eventos
     def _on_frame(self, frame):
         if not self.running or self.controller is None:
+            return
+        if self.recenter_screen is not None:
+            self.recenter_screen.on_frame(frame)  # mientras se recentra, el cursor no se mueve
             return
         try:
             snap = self.controller.update(frame)
@@ -222,6 +343,7 @@ class ControlSession(QObject):
         was_running = self.running
         self.running = False
         self._timer.stop()
+        self._close_recenter_screen()
         try:
             if self.controller is not None:
                 self.controller.release_all()
@@ -237,6 +359,9 @@ class ControlSession(QObject):
             hotkey, self.hotkey = self.hotkey, None
             if hotkey is not None:
                 hotkey.stop()
+            recenter_hotkey, self.recenter_hotkey = self.recenter_hotkey, None
+            if recenter_hotkey is not None:
+                recenter_hotkey.stop()
             safe = getattr(self.mouse, "safe_release", None)
             if safe:
                 safe()
