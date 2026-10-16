@@ -588,12 +588,24 @@ def evaluate(
     return rows
 
 
+OLD_FILTER = {"feature_median_window": 1, "deadzone_px": 0}  # el pipeline anterior no tenía mediana ni zona muerta
+EXPONENTIAL = {"filter_kind": "exponential"}
+
+
+def filter_variants(fit=fit_baseline, prefix: str = "") -> List[Variant]:
+    """Mismo mapeo con los distintos filtros (parte B)."""
+    return [
+        Variant(f"{prefix}exponencial (anterior)", fit, dict(OLD_FILTER), dict(EXPONENTIAL)),
+        Variant(f"{prefix}sin suavizado (referencia)", fit, dict(OLD_FILTER, smoothing_percent=0), dict(EXPONENTIAL)),
+        Variant(f"{prefix}One Euro", fit, dict(OLD_FILTER)),
+        Variant(f"{prefix}One Euro + mediana", fit, {"deadzone_px": 0}),
+        Variant(f"{prefix}One Euro + mediana + zona muerta", fit, {}),
+    ]
+
+
 def default_variants() -> List[Variant]:
     """Variantes que compara scripts/replay_session.py (la primera es la referencia anterior)."""
-    return [
-        Variant("anterior: compacto cuadr. a=0.02 + exponencial", fit_baseline),
-        Variant("anterior sin suavizado (referencia)", fit_baseline, {"smoothing_percent": 0}),
-    ]
+    return filter_variants(fit_baseline, "mapeo anterior + ")
 
 
 def format_table(rows: Sequence[Dict[str, object]]) -> str:

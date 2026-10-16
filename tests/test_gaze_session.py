@@ -148,17 +148,21 @@ class TestEvaluation(unittest.TestCase):
         cls.sess = gs.synthesize_session(seed=3)
 
     def test_metrics_are_finite_and_use_validation_points(self):
-        rows = gs.evaluate(self.sess, gs.default_variants())
-        self.assertEqual(len(rows), 2)
+        rows = gs.evaluate(self.sess, gs.filter_variants())
+        self.assertEqual(len(rows), 5)
         for r in rows:
             self.assertEqual(r["stage"], "validation")
             self.assertEqual(r["points"], 5)
             for k in ("bias_px", "bias_deg", "jitter_px", "latency_ms"):
                 self.assertTrue(np.isfinite(r[k]), (r["name"], k))
-        smooth, raw = rows
-        self.assertLess(smooth["jitter_px"], raw["jitter_px"])  # el suavizado reduce el jitter
+        expo, raw, euro, euro_med, full = rows
+        self.assertLess(expo["jitter_px"], raw["jitter_px"])  # el suavizado reduce el jitter
         self.assertEqual(raw["latency_ms"], 0.0)  # sin suavizado no hay retraso
-        self.assertGreater(smooth["latency_ms"], 0.0)
+        self.assertGreater(expo["latency_ms"], 0.0)
+        # parte B: la mediana y el One Euro reducen el jitter respecto del exponencial anterior
+        self.assertLess(euro_med["jitter_px"], expo["jitter_px"])
+        self.assertLess(full["jitter_px"], expo["jitter_px"] * 0.9)
+        self.assertLessEqual(full["latency_ms"], 150)
         table = gs.format_table(rows)
         self.assertIn("Desvío px", table)
         self.assertIn("validación", table)

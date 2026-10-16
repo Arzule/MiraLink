@@ -5,9 +5,13 @@ tasa de cuadros fija), un MouseBackend inyectado y los umbrales de la configurac
 Los backends reales (PyAutoGUI, RegisterHotKey) van detrás de interfaces delgadas con versiones
 falsas para los tests.
 
-Suavizado exponencial por tiempo: alpha = 1 - 0.95 * smoothing_percent / 100 (referido a 30 fps);
-con intervalo dt, alpha_efectivo = 1 - (1 - alpha) ** (dt * 30). smoothing_percent = 0 -> alpha = 1
-(sin suavizado: el cursor sigue la estimación cruda); 100 -> alpha = 0.05 (muy suave).
+Pipeline por cuadro: mediana corta de los rasgos (feature_median_window) -> mapeo -> límites de
+pantalla -> filtro One Euro con los timestamps (min_cutoff desde smoothing_percent, beta y d_cutoff
+de la configuración; ver gaze_filters) -> zona muerta (deadzone_px) -> mouse.
+
+El suavizado exponencial anterior se conserva como `filter_kind="exponential"` para comparar en
+scripts/replay_session.py: alpha = 1 - 0.95 * smoothing_percent / 100 (referido a 30 fps); con
+intervalo dt, alpha_efectivo = 1 - (1 - alpha) ** (dt * 30).
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from config_manager import DEFAULT_CONFIG
+from gaze_filters import MedianFilter, OneEuroFilter, apply_deadzone, smoothing_to_min_cutoff
 
 STATE_IDLE = "IDLE"
 STATE_DWELL = "DWELL"
@@ -278,7 +283,10 @@ class CursorController:
         origin: Tuple[int, int] = (0, 0),
         config_getter: Callable[[], Dict] = lambda: {},
         listener: Optional[Callable[[str, float, float], None]] = None,
+        filter_kind: str = "one_euro",
     ):
+        if filter_kind not in ("one_euro", "exponential"):
+            raise ValueError(f"filtro desconocido: {filter_kind}")
         self.mapper = mapper
         self.mouse = mouse
         self.width = int(screen_width)
@@ -286,9 +294,13 @@ class CursorController:
         self.origin = origin
         self.config_getter = config_getter
         self.listener = listener
+        self.filter_kind = filter_kind
         self.state = STATE_IDLE
         self.paused = False
-        self.pos: Optional[Tuple[float, float]] = None  # relativa a la pantalla (sin origen)
+        self.pos: Optional[Tuple[float, float]] = None  # salida del filtro, relativa a la pantalla (sin origen)
+        self.display: Optional[Tuple[float, float]] = None  # posición mostrada tras la zona muerta
+        self._euro = OneEuroFilter()
+        self._median = MedianFilter(1)
         self._anchor: Optional[Tuple[float, float]] = None
         self._dwell_start = 0.0
         self._hold_start = 0.0
@@ -318,9 +330,9 @@ class CursorController:
             self.listener(name, x, y)
 
     def screen_pos(self) -> Tuple[float, float]:
-        if self.pos is None:
+        if self.display is None:
             return float(self.origin[0]), float(self.origin[1])
-        return self.pos[0] + self.origin[0], self.pos[1] + self.origin[1]
+        return self.display[0] + self.origin[0], self.display[1] + self.origin[1]
 
     def snapshot(self, ts: Optional[float] = None) -> CursorSnapshot:
         elapsed = 0.0
@@ -336,7 +348,7 @@ class CursorController:
             frozen=self._frozen,
             paused=self.paused,
             face_found=self._face_found,
-            positioned=self.pos is not None,
+            positioned=self.display is not None,
         )
 
     # ---------------------------------------------------------------------- pausa
@@ -413,35 +425,52 @@ class CursorController:
             self._handle_blink(event, ts)
 
         # 2) movimiento
+        if not face:
+            self._median.reset()  # sin rostro: la próxima mediana no mezcla con muestras viejas
         if not frozen:
-            self._move(frame.features, dt)
+            self._move(frame.features, dt, ts)
 
         # 3) dwell
         self._update_dwell(ts, dt, frozen)
         return self.snapshot(ts)
 
-    def _move(self, features, dt: float):
+    def _filter(self, gx: float, gy: float, dt: float, ts: float) -> Tuple[float, float]:
+        """Suavizado de la estimación (One Euro por defecto; exponencial solo para comparar)."""
+        if self.pos is None:
+            self._euro.reset()
+        if self.filter_kind == "exponential":
+            if self.pos is None:
+                return gx, gy
+            alpha = self.smoothing_alpha()
+            a = 1.0 if alpha >= 1.0 else 1.0 - (1.0 - alpha) ** (min(dt, MAX_SMOOTHING_DT_S) * REFERENCE_FPS)
+            return self.pos[0] + a * (gx - self.pos[0]), self.pos[1] + a * (gy - self.pos[1])
+        min_cutoff = smoothing_to_min_cutoff(float(self._cfg("smoothing_percent")))
+        if min_cutoff is None:
+            self._euro.reset()  # 0 %: sin suavizado, el cursor sigue la estimación cruda
+            return gx, gy
+        self._euro.min_cutoff = min_cutoff
+        self._euro.beta = float(self._cfg("one_euro_beta"))
+        self._euro.d_cutoff = float(self._cfg("one_euro_d_cutoff"))
+        out = self._euro((gx, gy), ts)
+        return float(out[0]), float(out[1])
+
+    def _move(self, features, dt: float, ts: float):
         try:
-            gx, gy = self.mapper.predict_one(features)
+            self._median.window = int(self._cfg("feature_median_window"))
+            filtered = self._median(features)
+            gx, gy = self.mapper.predict_one(filtered)
         except Exception:  # noqa: BLE001 - un cuadro corrupto no debe tumbar el control
             return
         if not (math.isfinite(gx) and math.isfinite(gy)):
             return
         gx = min(max(gx, 0.0), self.width - 1.0)
         gy = min(max(gy, 0.0), self.height - 1.0)
-        if self.pos is None:
-            new = (gx, gy)
-        else:
-            alpha = self.smoothing_alpha()
-            if alpha >= 1.0:
-                a = 1.0
-            else:
-                a = 1.0 - (1.0 - alpha) ** (min(dt, MAX_SMOOTHING_DT_S) * REFERENCE_FPS)
-            new = (self.pos[0] + a * (gx - self.pos[0]), self.pos[1] + a * (gy - self.pos[1]))
-        moved = self.pos is None or abs(new[0] - self.pos[0]) >= 0.5 or abs(new[1] - self.pos[1]) >= 0.5
-        self.pos = new
+        self.pos = self._filter(gx, gy, dt, ts)
+        shown = apply_deadzone(self.display, self.pos, float(self._cfg("deadzone_px")))
+        moved = self.display is None or abs(shown[0] - self.display[0]) >= 0.5 or abs(shown[1] - self.display[1]) >= 0.5
         if moved:
-            self.mouse.move(new[0] + self.origin[0], new[1] + self.origin[1])
+            self.display = shown
+            self.mouse.move(shown[0] + self.origin[0], shown[1] + self.origin[1])
 
     def _handle_blink(self, event, ts: float):
         if ts < self._ignore_until:
@@ -458,15 +487,16 @@ class CursorController:
             self._emit("click")
 
     def _update_dwell(self, ts: float, dt: float, frozen: bool):
-        if self.state == STATE_HOLD or self.pos is None:
+        if self.state == STATE_HOLD or self.display is None:
             return
         if frozen:
             if self._anchor is not None:
                 self._dwell_start += dt  # el reloj del dwell se detiene mientras no hay mirada fiable
             return
         radius = float(self._cfg("dwell_radius_px"))
-        if self._anchor is None or math.hypot(self.pos[0] - self._anchor[0], self.pos[1] - self._anchor[1]) > radius:
-            self._anchor = self.pos
+        p = self.display  # el dwell se mide sobre la posición que ve el usuario
+        if self._anchor is None or math.hypot(p[0] - self._anchor[0], p[1] - self._anchor[1]) > radius:
+            self._anchor = p
             self._dwell_start = ts
             self.state = STATE_IDLE
             return

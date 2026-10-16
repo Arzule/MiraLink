@@ -22,6 +22,10 @@ DEFAULT_CONFIG = {
         "blink_max_ms": 2000,
         "freeze_after_blink_ms": 150,
         "hold_timeout_s": 30,
+        "one_euro_beta": 0.002,
+        "one_euro_d_cutoff": 1.0,
+        "feature_median_window": 3,
+        "deadzone_px": 4,
     },
     "ui": {"theme": "default", "font_scale": 1.0},
     "overlay": {"buttons": {}},
@@ -104,9 +108,20 @@ def _validate_config(config):
         ("blink_max_ms", 500, 5000),
         ("freeze_after_blink_ms", 0, 500),
         ("hold_timeout_s", 5, 120),
+        ("feature_median_window", 1, 9),
+        ("deadzone_px", 0, 50),
     ):
         try:
             inter[key] = _clamp(int(inter.get(key, DEFAULT_CONFIG["interaction"][key])), lo, hi)
+        except Exception:
+            inter[key] = DEFAULT_CONFIG["interaction"][key]
+    # filtro One Euro (flotantes con clamp; no finitos -> valor por defecto)
+    for key, lo, hi in (("one_euro_beta", 0.0, 1.0), ("one_euro_d_cutoff", 0.1, 10.0)):
+        try:
+            value = float(inter.get(key, DEFAULT_CONFIG["interaction"][key]))
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError(key)
+            inter[key] = _clamp(value, lo, hi)
         except Exception:
             inter[key] = DEFAULT_CONFIG["interaction"][key]
     if not isinstance(inter.get("hold_enabled"), bool):
