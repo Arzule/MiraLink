@@ -10,14 +10,26 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-CALIBRATION_VERSION = 1
+CALIBRATION_VERSION = 2  # 2: modelo, alpha por validación cruzada, recorte de extrapolación y offset
+SUPPORTED_VERSIONS = (1, 2)
 CALIBRATION_FILENAME = "calibration.json"
 WARN_ERROR_PX = 150  # por encima de este error estimado se sugiere repetir
-FEATURE_SETS = ("compact", "full")
+RAW_FEATURE_DIM = 10  # eye_tracker.FEATURE_NAMES (los vectores viejos de 9 se completan con roll = 0)
+FEATURE_SETS = ("eyes", "compact", "head", "full")
+MODELS = ("linear", "quad", "quad_reduced")
+AGGREGATES = ("samples", "median")
+ALPHA_GRID = (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0)
+CLAMP_MARGIN = 0.25  # fracción del rango calibrado que se permite extrapolar (en rasgos normalizados)
+AGGREGATE_CHUNKS = 5  # "median": medianas de 5 tramos consecutivos por punto
+MAX_RECENTER_FRACTION = 0.25  # un offset mayor que esta fracción de la pantalla se rechaza
+
+# Ajuste usado por la aplicación: el de menor error de VALIDACIÓN en scripts/replay_session.py con
+# sesiones sintéticas (pendiente de confirmar con una sesión real; comparativa en AGENTS.md)
+DEFAULT_FIT = {"feature_set": "compact", "model": "quad_reduced", "alpha": "cv", "aggregate": "samples"}
 
 
 class CalibrationError(Exception):
@@ -28,112 +40,295 @@ def default_calibration_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), CALIBRATION_FILENAME)
 
 
-def reduce_features(x: np.ndarray, feature_set: str = "compact") -> np.ndarray:
-    """Reduce el vector de 9 rasgos de eye_tracker.
-
-    compact (6): [iris_along_medio, iris_perp_medio, nose_x, nose_y, yaw, pitch]
-    full (9): sin cambios. Se excluye la distancia interocular (proxy de profundidad) en compact.
-    """
+def pad_features(x: np.ndarray) -> np.ndarray:
+    """(n, d) con d >= RAW_FEATURE_DIM; los rasgos que faltan (vectores viejos sin roll) valen 0."""
     x = np.atleast_2d(np.asarray(x, dtype=float))
+    if x.shape[1] < RAW_FEATURE_DIM:
+        x = np.hstack([x, np.zeros((x.shape[0], RAW_FEATURE_DIM - x.shape[1]))])
+    return x
+
+
+def reduce_features(x: np.ndarray, feature_set: str = "compact") -> np.ndarray:
+    """Reduce el vector de rasgos de eye_tracker (FEATURE_NAMES) al conjunto pedido.
+
+    eyes (2): [iris_along_medio, iris_perp_medio]
+    compact (6): + [nose_x, nose_y, yaw, pitch]
+    head (8): compact + [roll, interocular] (compensación completa de la cabeza: giro, posición y escala)
+    full (10): los 10 rasgos sin promediar los ojos.
+    """
+    x = pad_features(x)
+    along = (x[:, 0] + x[:, 2]) / 2.0
+    perp = (x[:, 1] + x[:, 3]) / 2.0
+    if feature_set == "eyes":
+        return np.column_stack([along, perp])
+    if feature_set == "compact":
+        return np.column_stack([along, perp, x[:, 4], x[:, 5], x[:, 7], x[:, 8]])
+    if feature_set == "head":
+        return np.column_stack([along, perp, x[:, 4], x[:, 5], x[:, 7], x[:, 8], x[:, 9], x[:, 6]])
     if feature_set == "full":
-        return x
-    if feature_set != "compact":
-        raise ValueError(f"feature_set desconocido: {feature_set}")
-    return np.column_stack(
-        [(x[:, 0] + x[:, 2]) / 2.0, (x[:, 1] + x[:, 3]) / 2.0, x[:, 4], x[:, 5], x[:, 7], x[:, 8]]
-    )
+        return x[:, :RAW_FEATURE_DIM]
+    raise ValueError(f"feature_set desconocido: {feature_set}")
 
 
-def _poly2(z: np.ndarray) -> np.ndarray:
-    """Rasgos polinomiales de grado 2: [1, z_i, z_i*z_j (i<=j)]."""
+def feature_set_dim(feature_set: str) -> int:
+    return {"eyes": 2, "compact": 6, "head": 8, "full": RAW_FEATURE_DIM}[feature_set]
+
+
+def _design(z: np.ndarray, model: str) -> np.ndarray:
+    """Términos del modelo sobre rasgos normalizados z (los dos primeros son los del iris).
+
+    linear: [1, z]; quad: [1, z, z_i*z_j (i<=j)]; quad_reduced: [1, z, iris_a^2, iris_a*iris_p, iris_p^2]
+    (curvatura solo en el iris; la cabeza entra lineal: menos parámetros con solo 9 puntos).
+    """
     n, d = z.shape
     cols = [np.ones(n)]
     cols.extend(z[:, i] for i in range(d))
-    for i in range(d):
-        for j in range(i, d):
-            cols.append(z[:, i] * z[:, j])
+    if model == "quad":
+        pairs = [(i, j) for i in range(d) for j in range(i, d)]
+    elif model == "quad_reduced":
+        pairs = [(0, 0), (0, 1), (1, 1)] if d >= 2 else [(0, 0)]
+    elif model == "linear":
+        pairs = []
+    else:
+        raise ValueError(f"modelo desconocido: {model}")
+    cols.extend(z[:, i] * z[:, j] for i, j in pairs)
     return np.column_stack(cols)
 
 
-class GazeMapper:
-    """Regresión ridge con rasgos polinomiales de grado 2 (normalización + ridge, solo numpy)."""
+def n_terms(d: int, model: str) -> int:
+    return _design(np.zeros((1, d)), model).shape[1]
 
-    def __init__(self, feature_set: str = "compact", alpha: float = 0.02, scale_floor: float = 0.02):
+
+def _poly2(z: np.ndarray) -> np.ndarray:
+    """Rasgos polinomiales de grado 2: [1, z_i, z_i*z_j (i<=j)] (compatibilidad)."""
+    return _design(z, "quad")
+
+
+def aggregate_point_samples(x, y, groups, chunks: int = AGGREGATE_CHUNKS):
+    """Mediana por tramos: cada punto se parte en `chunks` tramos consecutivos y cada tramo aporta la
+    mediana de sus muestras. Reduce el ruido del iris (y la atenuación que provoca en la regresión)
+    sin perder del todo la variación de la cabeza dentro del punto."""
+    x = np.atleast_2d(np.asarray(x, dtype=float))
+    y = np.atleast_2d(np.asarray(y, dtype=float))
+    groups = np.asarray(groups)
+    xs, ys, gs = [], [], []
+    for g in np.unique(groups):
+        idx = np.flatnonzero(groups == g)
+        for part in np.array_split(idx, min(chunks, len(idx))):
+            if len(part):
+                xs.append(np.median(x[part], axis=0))
+                ys.append(np.median(y[part], axis=0))
+                gs.append(g)
+    return np.vstack(xs), np.vstack(ys), np.asarray(gs)
+
+
+def filter_point_samples(
+    samples: np.ndarray,
+    z_max: float = 2.5,
+    pose_tol: float = 0.15,
+    pose_max: float = 0.7,
+    iris_floor: float = 0.003,
+) -> np.ndarray:
+    """Máscara de muestras válidas de UN punto de calibración.
+
+    - Pose fuera de rango: |yaw|, |pitch| o |roll| > pose_max rad, o a más de pose_tol rad de la
+      mediana del punto (la cabeza se movió durante la captura).
+    - Atípicos del iris: desviación robusta (mediana y MAD x 1.4826, con piso `iris_floor`) mayor que
+      `z_max` en cualquiera de los 4 rasgos del iris.
+    """
+    x = pad_features(samples)
+    keep = np.isfinite(x).all(axis=1)
+    pose = x[:, 7:10]
+    keep &= (np.abs(pose) <= pose_max).all(axis=1)
+    if keep.any():
+        med = np.median(pose[keep], axis=0)
+        keep &= (np.abs(pose - med) <= pose_tol).all(axis=1)
+    if keep.any():
+        eyes = x[:, :4]
+        med = np.median(eyes[keep], axis=0)
+        sigma = np.maximum(np.median(np.abs(eyes[keep] - med), axis=0) * 1.4826, iris_floor)
+        keep &= (np.abs(eyes - med) / sigma <= z_max).all(axis=1)
+    return keep
+
+
+class GazeMapper:
+    """Regresión ridge sobre rasgos normalizados (solo numpy).
+
+    - feature_set: eyes / compact / head / full (reduce_features).
+    - model: linear / quad / quad_reduced (_design).
+    - alpha: penalización relativa al número de muestras, o "cv" para elegirla de ALPHA_GRID con
+      validación cruzada dejando un punto fuera.
+    - aggregate: "samples" (todas las muestras) o "median" (aggregate_point_samples).
+    - Predicción: los rasgos normalizados se recortan al rango calibrado +/- CLAMP_MARGIN para no
+      extrapolar (el polinomio se dispara fuera del rango); después se suma el offset de "Recentrar".
+    Los valores por defecto del constructor son los del mapeo anterior; la aplicación usa DEFAULT_FIT.
+    """
+
+    def __init__(
+        self,
+        feature_set: str = "compact",
+        alpha: Union[float, str] = 0.02,
+        scale_floor: float = 0.02,
+        model: str = "quad",
+        aggregate: str = "samples",
+        clamp: bool = True,
+    ):
         if feature_set not in FEATURE_SETS:
             raise ValueError(f"feature_set desconocido: {feature_set}")
+        if model not in MODELS:
+            raise ValueError(f"modelo desconocido: {model}")
+        if aggregate not in AGGREGATES:
+            raise ValueError(f"agregación desconocida: {aggregate}")
         self.feature_set = feature_set
-        self.alpha = float(alpha)  # penalización relativa al número de muestras
+        self.model = model
+        self.aggregate = aggregate
+        self.alpha_mode = "cv" if alpha == "cv" else "fixed"
+        self.alpha = 0.02 if alpha == "cv" else float(alpha)  # en "cv" se reemplaza al ajustar
         self.scale_floor = float(scale_floor)  # evita amplificar ruido de rasgos casi constantes
+        self.clamp = clamp
         self.mean: Optional[np.ndarray] = None
         self.scale: Optional[np.ndarray] = None
         self.weights: Optional[np.ndarray] = None  # (m, 2)
+        self.z_min: Optional[np.ndarray] = None
+        self.z_max: Optional[np.ndarray] = None
+        self.offset = np.zeros(2)
         self.metrics: Dict[str, float] = {}
+
+    @classmethod
+    def from_fit_options(cls, options: Optional[dict] = None) -> "GazeMapper":
+        opts = dict(DEFAULT_FIT)
+        opts.update(options or {})
+        return cls(opts["feature_set"], opts["alpha"], model=opts["model"], aggregate=opts["aggregate"])
 
     @property
     def is_fitted(self) -> bool:
         return self.weights is not None
 
-    def _design(self, x: np.ndarray) -> np.ndarray:
-        r = reduce_features(x, self.feature_set)
-        return _poly2((r - self.mean) / self.scale)
-
-    def _solve(self, r: np.ndarray, y: np.ndarray, mean, scale) -> np.ndarray:
-        p = _poly2((r - mean) / scale)
-        penalty = self.alpha * len(r) * np.eye(p.shape[1])
-        penalty[0, 0] = 0.0  # el término constante no se penaliza
-        return np.linalg.solve(p.T @ p + penalty, p.T @ y)
-
+    # ------------------------------------------------------------------ ajuste
     def _normalization(self, r: np.ndarray):
         return r.mean(axis=0), np.maximum(r.std(axis=0), self.scale_floor)
 
-    def fit(self, x: np.ndarray, y: np.ndarray, groups: Optional[np.ndarray] = None) -> Dict[str, float]:
-        """Ajusta el mapeo. `groups` (punto de calibración de cada muestra) activa la validación
-        cruzada dejando un punto fuera. Devuelve y guarda métricas (rmse_px, cv_rmse_px)."""
-        x = np.atleast_2d(np.asarray(x, dtype=float))
+    def _solve(self, r, y, mean, scale, alpha) -> np.ndarray:
+        p = _design((r - mean) / scale, self.model)
+        penalty = alpha * len(r) * np.eye(p.shape[1])
+        penalty[0, 0] = 0.0  # el término constante no se penaliza
+        return np.linalg.solve(p.T @ p + penalty, p.T @ y)
+
+    def _bounded(self, z, z_min, z_max):
+        if not self.clamp or z_min is None:
+            return z
+        span = np.maximum(z_max - z_min, 1e-9)
+        return np.clip(z, z_min - CLAMP_MARGIN * span, z_max + CLAMP_MARGIN * span)
+
+    def _cv_errors(self, r, y, groups, alpha) -> np.ndarray:
+        """Errores cuadrados al predecir cada punto con un ajuste sin ese punto."""
+        sq = []
+        for g in np.unique(groups):
+            test = groups == g
+            train = ~test
+            mean, scale = self._normalization(r[train])
+            w = self._solve(r[train], y[train], mean, scale, alpha)
+            zt = (r[train] - mean) / scale
+            z = self._bounded((r[test] - mean) / scale, zt.min(axis=0), zt.max(axis=0))
+            sq.extend(np.sum((_design(z, self.model) @ w - y[test]) ** 2, axis=1))
+        return np.asarray(sq)
+
+    def fit(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        groups: Optional[np.ndarray] = None,
+        val_x: Optional[np.ndarray] = None,
+        val_y: Optional[np.ndarray] = None,
+        val_groups: Optional[np.ndarray] = None,
+    ) -> Dict[str, float]:
+        """Ajusta el mapeo. `groups` (punto de cada muestra) activa la validación cruzada dejando un
+        punto fuera; `val_*` (puntos de validación nuevos) dan el error real. Devuelve las métricas."""
+        x = pad_features(x)
         y = np.atleast_2d(np.asarray(y, dtype=float))
         if len(x) != len(y) or len(x) < 3:
             raise ValueError("Se necesitan al menos 3 muestras con objetivos del mismo tamaño")
         if not (np.isfinite(x).all() and np.isfinite(y).all()):
             raise ValueError("Las muestras contienen valores no finitos")
+        n_raw = len(x)
+        if groups is not None:
+            groups = np.asarray(groups)
+            if self.aggregate == "median":
+                x, y, groups = aggregate_point_samples(x, y, groups)
         r = reduce_features(x, self.feature_set)
+        uniq = np.unique(groups) if groups is not None else np.array([])
+        cv_by_alpha = {}
+        if groups is not None and len(uniq) >= 3:
+            alphas = ALPHA_GRID if self.alpha_mode == "cv" else (self.alpha,)
+            for a in alphas:
+                cv_by_alpha[a] = float(np.sqrt(np.mean(self._cv_errors(r, y, groups, a))))
+            if self.alpha_mode == "cv":
+                self.alpha = min(cv_by_alpha, key=cv_by_alpha.get)
         self.mean, self.scale = self._normalization(r)
-        self.weights = self._solve(r, y, self.mean, self.scale)
+        self.weights = self._solve(r, y, self.mean, self.scale, self.alpha)
+        z = (r - self.mean) / self.scale
+        self.z_min, self.z_max = z.min(axis=0), z.max(axis=0)
+        self.offset = np.zeros(2)
         pred = self.predict(x)
         metrics = {
             "rmse_px": float(np.sqrt(np.mean(np.sum((pred - y) ** 2, axis=1)))),
-            "n_samples": int(len(x)),
+            "n_samples": int(n_raw),
+            "alpha": float(self.alpha),
         }
-        if groups is not None:
-            groups = np.asarray(groups)
-            uniq = np.unique(groups)
-            if len(uniq) >= 3:
-                sq = []
-                for g in uniq:
-                    test = groups == g
-                    train = ~test
-                    mean, scale = self._normalization(r[train])
-                    w = self._solve(r[train], y[train], mean, scale)
-                    p = _poly2((r[test] - mean) / scale) @ w
-                    sq.extend(np.sum((p - y[test]) ** 2, axis=1))
-                metrics["cv_rmse_px"] = float(np.sqrt(np.mean(sq)))
-                metrics["n_points"] = int(len(uniq))
+        if cv_by_alpha:
+            metrics["cv_rmse_px"] = cv_by_alpha[self.alpha]
+            metrics["n_points"] = int(len(uniq))
+        if val_x is not None and val_y is not None and len(val_x):
+            metrics.update(self.validation_metrics(val_x, val_y, val_groups))
         self.metrics = metrics
         return metrics
 
-    def predict(self, x: np.ndarray) -> np.ndarray:
+    def validation_metrics(self, val_x, val_y, val_groups=None) -> Dict[str, float]:
+        """Error con puntos NO usados al ajustar: por punto, |mediana de las predicciones - objetivo|."""
+        val_x = pad_features(val_x)
+        val_y = np.atleast_2d(np.asarray(val_y, dtype=float))
+        groups = np.zeros(len(val_x), dtype=int) if val_groups is None else np.asarray(val_groups)
+        pred = self.predict(val_x, apply_offset=False)
+        per_point = []
+        for g in np.unique(groups):
+            m = groups == g
+            per_point.append(float(np.linalg.norm(np.median(pred[m], axis=0) - val_y[m][0])))
+        return {
+            "validation_px": float(np.mean(per_point)),
+            "validation_max_px": float(np.max(per_point)),
+            "validation_rmse_px": float(np.sqrt(np.mean(np.sum((pred - val_y) ** 2, axis=1)))),
+            "validation_points": int(len(per_point)),
+        }
+
+    # -------------------------------------------------------------- predicción
+    def predict(self, x: np.ndarray, apply_offset: bool = True) -> np.ndarray:
         """Devuelve (n, 2) en píxeles físicos (sin recortar a la pantalla)."""
         if not self.is_fitted:
             raise RuntimeError("El mapper no está ajustado")
-        return self._design(np.atleast_2d(np.asarray(x, dtype=float))) @ self.weights
+        z = (reduce_features(x, self.feature_set) - self.mean) / self.scale
+        out = _design(self._bounded(z, self.z_min, self.z_max), self.model) @ self.weights
+        return out + self.offset if apply_offset else out
 
     def predict_one(self, features: np.ndarray) -> Tuple[float, float]:
         out = self.predict(features)[0]
         return float(out[0]), float(out[1])
 
     @property
+    def error_source(self) -> str:
+        """De dónde sale estimated_error_px: validation (puntos nuevos), cv (dejando un punto fuera) o train."""
+        if "validation_px" in self.metrics:
+            return "validation"
+        if "cv_rmse_px" in self.metrics:
+            return "cv"
+        return "train"
+
+    @property
     def estimated_error_px(self) -> float:
-        """Error estimado: validación cruzada si existe; si no, el RMSE de entrenamiento."""
-        return float(self.metrics.get("cv_rmse_px", self.metrics.get("rmse_px", float("inf"))))
+        """Error mostrado: validación con puntos nuevos si existe; si no, validación cruzada; si no, entrenamiento."""
+        for key in ("validation_px", "cv_rmse_px", "rmse_px"):
+            if key in self.metrics:
+                return float(self.metrics[key])
+        return float("inf")
 
     # ----------------------------------------------------- serialización
     def to_dict(self, geometry: Dict[str, int], camera_index: int = 0) -> dict:
@@ -145,12 +340,17 @@ class GazeMapper:
             "camera_index": int(camera_index),
             "screen": {k: int(geometry[k]) for k in ("x", "y", "width", "height")},
             "feature_set": self.feature_set,
-            "degree": 2,
+            "model": self.model,
+            "aggregate": self.aggregate,
             "alpha": self.alpha,
+            "alpha_mode": self.alpha_mode,
             "scale_floor": self.scale_floor,
             "mean": self.mean.tolist(),
             "scale": self.scale.tolist(),
             "weights": self.weights.tolist(),
+            "z_min": None if self.z_min is None else self.z_min.tolist(),
+            "z_max": None if self.z_max is None else self.z_max.tolist(),
+            "offset": [float(self.offset[0]), float(self.offset[1])],
             "metrics": self.metrics,
         }
 
@@ -158,7 +358,8 @@ class GazeMapper:
     def from_dict(cls, data: dict, geometry: Optional[Dict[str, int]] = None) -> "GazeMapper":
         """Valida y reconstruye. Lanza CalibrationError si es inválido o la geometría cambió."""
         try:
-            if data.get("version") != CALIBRATION_VERSION:
+            version = data.get("version")
+            if version not in SUPPORTED_VERSIONS:
                 raise CalibrationError("Versión de calibración no compatible")
             if geometry is not None:
                 saved = data["screen"]
@@ -168,22 +369,43 @@ class GazeMapper:
                             "La geometría de pantalla cambió desde la calibración "
                             f"({saved['width']}x{saved['height']} -> {geometry['width']}x{geometry['height']})"
                         )
-            mapper = cls(data["feature_set"], float(data["alpha"]), float(data.get("scale_floor", 0.02)))
+            mapper = cls(
+                data["feature_set"],
+                float(data["alpha"]),
+                float(data.get("scale_floor", 0.02)),
+                model=data.get("model", "quad"),
+                aggregate=data.get("aggregate", "samples"),
+            )
+            mapper.alpha_mode = data.get("alpha_mode", "fixed")
             mapper.mean = np.asarray(data["mean"], dtype=float)
             mapper.scale = np.asarray(data["scale"], dtype=float)
             mapper.weights = np.asarray(data["weights"], dtype=float)
+            if data.get("z_min") is not None and data.get("z_max") is not None:
+                mapper.z_min = np.asarray(data["z_min"], dtype=float)
+                mapper.z_max = np.asarray(data["z_max"], dtype=float)
+            mapper.offset = np.asarray(data.get("offset", [0.0, 0.0]), dtype=float)
             mapper.metrics = dict(data.get("metrics", {}))
         except CalibrationError:
             raise
         except (KeyError, TypeError, ValueError) as e:
             raise CalibrationError(f"calibration.json inválido: {e}") from e
-        d = 6 if mapper.feature_set == "compact" else 9
-        m = 1 + d + d * (d + 1) // 2
-        if mapper.mean.shape != (d,) or mapper.scale.shape != (d,) or mapper.weights.shape != (m, 2):
-            raise CalibrationError("calibration.json inválido: dimensiones inesperadas")
-        for arr in (mapper.mean, mapper.scale, mapper.weights):
+        d = feature_set_dim(mapper.feature_set)
+        if version == 1 and mapper.feature_set == "full":
+            d = 9  # la versión 1 no tenía roll
+        shapes_ok = (
+            mapper.mean.shape == (d,)
+            and mapper.scale.shape == (d,)
+            and mapper.weights.shape == (n_terms(d, mapper.model), 2)
+            and mapper.offset.shape == (2,)
+            and (mapper.z_min is None or (mapper.z_min.shape == (d,) and mapper.z_max.shape == (d,)))
+        )
+        if not shapes_ok or (version == 1 and mapper.feature_set == "full"):
+            raise CalibrationError("calibration.json inválido: dimensiones inesperadas; calibra de nuevo")
+        for arr in (mapper.mean, mapper.scale, mapper.weights, mapper.offset):
             if not np.isfinite(arr).all():
                 raise CalibrationError("calibration.json inválido: valores no finitos")
+        if mapper.z_min is not None and not (np.isfinite(mapper.z_min).all() and np.isfinite(mapper.z_max).all()):
+            raise CalibrationError("calibration.json inválido: valores no finitos")
         if (mapper.scale <= 0).any():
             raise CalibrationError("calibration.json inválido: escala no positiva")
         return mapper
@@ -191,7 +413,10 @@ class GazeMapper:
 
 def save_calibration(path: str, mapper: GazeMapper, geometry: Dict[str, int], camera_index: int = 0) -> None:
     """Guarda calibration.json de forma atómica."""
-    data = mapper.to_dict(geometry, camera_index)
+    _write_json_atomic(path, mapper.to_dict(geometry, camera_index))
+
+
+def _write_json_atomic(path: str, data: dict) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -210,6 +435,19 @@ def load_calibration(path: str, geometry: Optional[Dict[str, int]] = None) -> Ga
     if not isinstance(data, dict):
         raise CalibrationError("calibration.json inválido")
     return GazeMapper.from_dict(data, geometry)
+
+
+def save_offset(path: str, offset: Tuple[float, float]) -> None:
+    """Guarda el offset de "Recentrar" en calibration.json sin tocar el resto del ajuste."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise CalibrationError(f"calibration.json ilegible: {e}") from e
+    if not isinstance(data, dict):
+        raise CalibrationError("calibration.json inválido")
+    data["offset"] = [float(offset[0]), float(offset[1])]
+    _write_json_atomic(path, data)
 
 
 # ---------------------------------------------------------------- sesión
@@ -261,6 +499,10 @@ class CalibrationSession:
 
     Con `validation` (lista de puntos) la sesión sigue con una fase de validación con el mismo
     ritmo; un punto de validación sin muestras suficientes tras los reintentos se omite (no aborta).
+
+    Con `robust` (por defecto) se descartan además los cuadros de los `post_blink_s` siguientes a un
+    parpadeo y, al cerrar cada punto, los atípicos y las poses de cabeza fuera de rango
+    (filter_point_samples); `min_samples` se cuenta después de filtrar.
     """
 
     def __init__(
@@ -273,6 +515,8 @@ class CalibrationSession:
         min_samples: int = 20,
         max_retries: int = 2,
         validation: Optional[List[Tuple[float, float]]] = None,
+        robust: bool = True,
+        post_blink_s: float = 0.15,
     ):
         self.points = grid_points(width, height, margin)
         self.validation = list(validation or [])
@@ -280,6 +524,10 @@ class CalibrationSession:
         self.capture_s = capture_s
         self.min_samples = min_samples
         self.max_retries = max_retries
+        self.robust = robust
+        self.post_blink_s = post_blink_s
+        self.discarded = 0  # muestras descartadas por atípicas o por pose (diagnóstico)
+        self._last_closed: Optional[float] = None
         self.stage = STAGE_CALIBRATION
         self.point_index = 0
         self.validation_index = 0
@@ -329,10 +577,14 @@ class CalibrationSession:
         span = self.settle_s if self.phase == PHASE_SETTLING else self.capture_s
         return float(min(1.0, max(0.0, (now - self._phase_start) / span)))
 
-    def update(self, timestamp: float, features: Optional[np.ndarray], valid: bool) -> str:
+    def update(self, timestamp: float, features: Optional[np.ndarray], valid: bool, eyes_closed: bool = False) -> str:
         """Procesa un cuadro (o un tick sin rostro con valid=False). Devuelve la fase actual."""
         if self.finished:
             return self.phase
+        if eyes_closed:
+            self._last_closed = timestamp
+        if valid and self.robust and self._last_closed is not None and timestamp - self._last_closed < self.post_blink_s:
+            valid = False  # justo tras un parpadeo el iris aún no es fiable
         if self._phase_start is None:
             self._phase_start = timestamp
         elapsed = timestamp - self._phase_start
@@ -350,7 +602,14 @@ class CalibrationSession:
                 self._samples.append(np.asarray(features, dtype=float).copy())
         return self.phase
 
+    def _clean_samples(self):
+        if self.robust and self._samples:
+            keep = filter_point_samples(np.vstack(self._samples))
+            self.discarded += int((~keep).sum())
+            self._samples = [s for s, k in zip(self._samples, keep) if k]
+
     def _finish_attempt(self, timestamp: float):
+        self._clean_samples()
         if self.in_validation:
             self._finish_validation_attempt(timestamp)
             return
@@ -428,12 +687,106 @@ class CalibrationSession:
         )
 
 
-def fit_session(session: CalibrationSession, feature_set: str = "compact") -> GazeMapper:
-    """Ajusta un GazeMapper con el resultado de una sesión terminada."""
+def fit_session(session: CalibrationSession, options: Optional[dict] = None) -> GazeMapper:
+    """Ajusta un GazeMapper (DEFAULT_FIT salvo `options`) con una sesión terminada; si hubo fase de
+    validación, sus puntos nuevos dan el error mostrado (metrics["validation_px"])."""
     res = session.result()
-    mapper = GazeMapper(feature_set)
-    mapper.fit(res.features, res.targets, res.groups)
+    mapper = GazeMapper.from_fit_options(options)
+    if res.has_validation:
+        mapper.fit(res.features, res.targets, res.groups, res.val_features, res.val_targets, res.val_groups)
+    else:
+        mapper.fit(res.features, res.targets, res.groups)
+    mapper.metrics["discarded_samples"] = int(session.discarded)
     return mapper
+
+
+# ------------------------------------------------------------------ recentrar
+class RecenterSession:
+    """"Recentrar": un único punto (el centro), ~1 s de muestras y un offset constante al mapeo.
+
+    Usa timestamps inyectados. Tras `settle_s` captura `capture_s`; con al menos `min_samples`
+    muestras válidas calcula offset = objetivo - mediana(predicción sin offset). Si no las consigue
+    en `max_wait_s`, o el offset supera MAX_RECENTER_FRACTION de la pantalla, falla con un mensaje.
+    """
+
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        settle_s: float = 0.6,
+        capture_s: float = 1.0,
+        min_samples: int = 15,
+        max_wait_s: float = 6.0,
+        post_blink_s: float = 0.15,
+    ):
+        self.width, self.height = int(width), int(height)
+        self.target = (self.width / 2.0, self.height / 2.0)
+        self.settle_s = settle_s
+        self.capture_s = capture_s
+        self.min_samples = min_samples
+        self.max_wait_s = max_wait_s
+        self.post_blink_s = post_blink_s
+        self.phase = PHASE_SETTLING
+        self.message = ""
+        self.offset: Optional[Tuple[float, float]] = None
+        self._start: Optional[float] = None
+        self._capture_start: Optional[float] = None
+        self._last_closed: Optional[float] = None
+        self._samples: List[np.ndarray] = []
+
+    @property
+    def finished(self) -> bool:
+        return self.phase in (PHASE_DONE, PHASE_ABORTED)
+
+    def progress(self, now: float) -> float:
+        if self._capture_start is None:
+            return 0.0
+        return float(min(1.0, max(0.0, (now - self._capture_start) / self.capture_s)))
+
+    def update(self, timestamp: float, features, valid: bool, eyes_closed: bool, mapper) -> str:
+        if self.finished:
+            return self.phase
+        if self._start is None:
+            self._start = timestamp
+        if eyes_closed:
+            self._last_closed = timestamp
+        if self._last_closed is not None and timestamp - self._last_closed < self.post_blink_s:
+            valid = False
+        if self.phase == PHASE_SETTLING and timestamp - self._start >= self.settle_s:
+            self.phase = PHASE_CAPTURING
+            self._capture_start = timestamp
+        if self.phase == PHASE_CAPTURING:
+            if valid and features is not None:
+                self._samples.append(np.asarray(features, dtype=float).copy())
+            if timestamp - self._capture_start >= self.capture_s and len(self._samples) >= self.min_samples:
+                self._finish(mapper)
+                return self.phase
+        if timestamp - self._start >= self.max_wait_s:
+            self.phase = PHASE_ABORTED
+            self.message = (
+                f"No se pudo recentrar: solo {len(self._samples)} muestras válidas. "
+                "Mira el punto central con el rostro visible."
+            )
+        return self.phase
+
+    def _finish(self, mapper):
+        x = np.vstack(self._samples)
+        x = x[filter_point_samples(x)]
+        if len(x) < max(3, self.min_samples // 2):
+            self.phase = PHASE_ABORTED
+            self.message = "No se pudo recentrar: demasiadas muestras inestables."
+            return
+        pred = np.median(mapper.predict(x, apply_offset=False), axis=0)
+        dx, dy = self.target[0] - pred[0], self.target[1] - pred[1]
+        if abs(dx) > MAX_RECENTER_FRACTION * self.width or abs(dy) > MAX_RECENTER_FRACTION * self.height:
+            self.phase = PHASE_ABORTED
+            self.message = (
+                f"El desvío medido ({dx:+.0f}, {dy:+.0f}) px es demasiado grande para recentrar; "
+                "calibra el rastreador de nuevo."
+            )
+            return
+        self.offset = (float(dx), float(dy))
+        self.phase = PHASE_DONE
 
 
 # ------------------------------------------------- utilidades de interfaz

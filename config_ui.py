@@ -94,6 +94,7 @@ class ConfigWindow(QMainWindow):
         self.btn_calibrate.clicked.connect(self.calibrate_requested.emit)
         self.calibrate_requested.connect(self._open_calibration)
         self.btn_control.clicked.connect(self._on_control_clicked)
+        self.btn_recenter.clicked.connect(self._on_recenter_clicked)
         self.btn_save.clicked.connect(self._on_save_clicked)
 
     # ------------------------------------------------------------------ UI
@@ -251,6 +252,14 @@ class ConfigWindow(QMainWindow):
         self.btn_control.setAccessibleName("Botón iniciar o pausar el control del cursor")
         self.btn_control.setMinimumHeight(48)
         row2_layout.addWidget(self.btn_control)
+
+        self.btn_recenter = QPushButton("Recentrar", row2)
+        self.btn_recenter.setObjectName("btn_recenter")
+        self.btn_recenter.setProperty("variant", "secondary")
+        self.btn_recenter.setAccessibleName("Botón recentrar la mirada (Ctrl+Alt+R)")
+        self.btn_recenter.setToolTip("Corrige la deriva mirando un punto central (Ctrl+Alt+R)")
+        self.btn_recenter.setMinimumHeight(48)
+        row2_layout.addWidget(self.btn_recenter)
 
         self.control_label = QLabel("", row2)
         self.control_label.setObjectName("description")
@@ -456,6 +465,8 @@ class ConfigWindow(QMainWindow):
         session.paused_changed.connect(self._on_paused_changed)
         session.tracker_active_changed.connect(self.set_tracker_active)
         session.failed.connect(self._on_control_failed)
+        if hasattr(session, "recentered"):
+            session.recentered.connect(self.control_label.setText)
         ok, message = session.start()
         if not ok:
             self.control_label.setText(message)
@@ -465,13 +476,26 @@ class ConfigWindow(QMainWindow):
         if message:
             self.control_label.setText(message)
 
+    def _on_recenter_clicked(self):
+        """Recentrar usa la sesión de control en marcha (un solo dueño de la cámara)."""
+        logger.info("Clic en 'Recentrar'")
+        session = self.control_session
+        if session is None or not session.running or not hasattr(session, "recenter"):
+            self.control_label.setText("Inicia el control del cursor para usar Recentrar (Ctrl+Alt+R).")
+            return
+        _ok, message = session.recenter()
+        if message:
+            self.control_label.setText(message)
+
     def _on_paused_changed(self, paused: bool):
         self.btn_control.setText("Iniciar Control del Cursor" if paused else "Pausar Control del Cursor")
         suffix = " (modo simulación: no se mueve el cursor real)" if self.dry_run else ""
         if paused:
             self.control_label.setText(f"Control pausado. Ctrl+Alt+P o el botón lo reanudan.{suffix}")
         else:
-            self.control_label.setText(f"Control activo. Ctrl+Alt+P pausa en cualquier momento.{suffix}")
+            self.control_label.setText(
+                f"Control activo. Ctrl+Alt+P pausa en cualquier momento; Ctrl+Alt+R recentra.{suffix}"
+            )
 
     def _on_control_failed(self, message: str):
         self.btn_control.setText("Iniciar Control del Cursor")

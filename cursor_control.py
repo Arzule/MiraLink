@@ -34,6 +34,7 @@ POST_ACTION_IGNORE_S = 0.3  # tras un clic o soltar se ignoran parpadeos
 REFERENCE_FPS = 30.0
 MAX_SMOOTHING_DT_S = 0.25  # un intervalo mayor se trata como este máximo (cámara con tirones)
 HOTKEY_LABEL = "Ctrl+Alt+P"
+RECENTER_HOTKEY_LABEL = "Ctrl+Alt+R"
 
 
 # ----------------------------------------------------------------- backends de mouse
@@ -124,11 +125,13 @@ class _WinHotkeyApi:
     MOD_CONTROL = 0x0002
     MOD_NOREPEAT = 0x4000
     VK_P = 0x50
+    VK_R = 0x52
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
     HOTKEY_ID = 0x4D4C
+    RECENTER_HOTKEY_ID = 0x4D4D
 
-    def __init__(self):
+    def __init__(self, vk: int = VK_P, hotkey_id: int = HOTKEY_ID, label: str = HOTKEY_LABEL):
         import ctypes
         from ctypes import wintypes
 
@@ -137,18 +140,21 @@ class _WinHotkeyApi:
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._thread_id = None
+        self.vk = vk
+        self.hotkey_id = hotkey_id
+        self.label = label
 
     def register(self) -> Tuple[bool, str]:
         self._thread_id = self.kernel32.GetCurrentThreadId()
         ok = self.user32.RegisterHotKey(
-            None, self.HOTKEY_ID, self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT, self.VK_P
+            None, self.hotkey_id, self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT, self.vk
         )
         if ok:
             return True, ""
         code = self._ctypes.get_last_error()
         if code == 1409:
-            return False, f"El atajo {HOTKEY_LABEL} ya está en uso por otra aplicación (código 1409)."
-        return False, f"No se pudo registrar el atajo {HOTKEY_LABEL} (código de Windows {code})."
+            return False, f"El atajo {self.label} ya está en uso por otra aplicación (código 1409)."
+        return False, f"No se pudo registrar el atajo {self.label} (código de Windows {code})."
 
     def get_message(self) -> str:
         msg = self._wintypes.MSG()
@@ -158,7 +164,7 @@ class _WinHotkeyApi:
         return "hotkey" if msg.message == self.WM_HOTKEY else "other"
 
     def unregister(self):
-        self.user32.UnregisterHotKey(None, self.HOTKEY_ID)
+        self.user32.UnregisterHotKey(None, self.hotkey_id)
 
     def post_quit(self):
         if self._thread_id is not None:
@@ -179,11 +185,22 @@ class HotkeyBackend:
 
 
 class Win32Hotkey(HotkeyBackend):
-    """Ctrl+Alt+P global con RegisterHotKey en su propio hilo. `callback` se llama desde ese hilo."""
+    """Atajo global Ctrl+Alt+<tecla> con RegisterHotKey en su propio hilo (Ctrl+Alt+P por defecto).
 
-    def __init__(self, callback: Callable[[], None], api_factory: Callable[[], object] = _WinHotkeyApi):
+    `callback` se llama desde ese hilo. Ctrl+Alt+R (Recentrar) usa la misma clase con vk=VK_R.
+    """
+
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        api_factory: Optional[Callable[[], object]] = None,
+        vk: int = _WinHotkeyApi.VK_P,
+        label: str = HOTKEY_LABEL,
+        hotkey_id: int = _WinHotkeyApi.HOTKEY_ID,
+    ):
         self.callback = callback
-        self._api_factory = api_factory
+        self.label = label
+        self._api_factory = api_factory or (lambda: _WinHotkeyApi(vk, hotkey_id, label))
         self._api = None
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
@@ -194,7 +211,7 @@ class Win32Hotkey(HotkeyBackend):
         self._thread = threading.Thread(target=self._run, name="miralink-hotkey", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
-            self.error = f"No se pudo iniciar el atajo {HOTKEY_LABEL} a tiempo."
+            self.error = f"No se pudo iniciar el atajo {self.label} a tiempo."
             return False
         return self.registered
 
@@ -203,7 +220,7 @@ class Win32Hotkey(HotkeyBackend):
             self._api = self._api_factory()
             ok, err = self._api.register()
         except Exception as e:  # noqa: BLE001
-            ok, err = False, f"No se pudo registrar el atajo {HOTKEY_LABEL}: {e}"
+            ok, err = False, f"No se pudo registrar el atajo {self.label}: {e}"
         self.registered = bool(ok)
         self.error = "" if ok else err
         self._ready.set()

@@ -32,6 +32,7 @@ from calibration import (
     CalibrationSession,
     GazeMapper,
     HoldToExit,
+    RecenterSession,
     face_guidance,
     fit_session,
     save_calibration,
@@ -163,7 +164,7 @@ class CalibrationScreen(QWidget):
         self,
         session: CalibrationSession,
         dpr: float = 1.0,
-        feature_set: str = "compact",
+        fit_options: Optional[dict] = None,
         clock: Callable[[], float] = time.monotonic,
         parent=None,
         recorder=None,
@@ -171,7 +172,7 @@ class CalibrationScreen(QWidget):
         super().__init__(parent)
         self.session = session
         self.dpr = dpr if dpr > 0 else 1.0
-        self.feature_set = feature_set
+        self.fit_options = fit_options  # None = calibration.DEFAULT_FIT
         self.clock = clock
         self.recorder = recorder  # gaze_session.SessionRecorder en --record-session
         self._layout_stage = session.stage
@@ -206,7 +207,7 @@ class CalibrationScreen(QWidget):
         if self.recorder is not None:
             self.recorder.add(frame, self.session)  # con el punto que se mostraba al llegar el cuadro
         valid = bool(frame.face_found and not frame.eyes_closed and frame.features is not None)
-        self.session.update(frame.timestamp, frame.features, valid)
+        self.session.update(frame.timestamp, frame.features, valid, eyes_closed=bool(frame.eyes_closed))
         self._check_finished()
         self._sync_layout()
         self.update()
@@ -238,7 +239,7 @@ class CalibrationScreen(QWidget):
             self._finished = True
             self._timer.stop()
             try:
-                mapper = fit_session(self.session, self.feature_set)
+                mapper = fit_session(self.session, self.fit_options)
             except Exception as e:  # noqa: BLE001
                 self._finished = False
                 self._abort(f"No se pudo ajustar la calibración: {e}")
@@ -428,15 +429,174 @@ class CalibrationScreen(QWidget):
         p.end()
 
 
-# ------------------------------------------------------ diálogo de resultado
-class CalibrationResultDialog(QDialog):
-    """"Calibración completada. Error estimado: ~N px" con Aceptar / Repetir."""
+# ------------------------------------------------------------ recentrar
+class RecenterScreen(QWidget):
+    """Pantalla completa de "Recentrar": un único punto central y ~1 s de muestras.
 
-    def __init__(self, error_px: float, parent=None):
+    Emite `completed((dx, dy))` con el offset o `aborted(str)`. Mantener ESC 1.5 s cancela. Si no
+    llegan cuadros, el reloj (watchdog) la cancela tras `max_wait_s` de la sesión más 1 s.
+    """
+
+    completed = Signal(object)
+    aborted = Signal(str)
+
+    HOLD_EXIT_S = 1.5
+
+    def __init__(self, session: RecenterSession, mapper, clock: Callable[[], float] = time.monotonic, parent=None):
+        super().__init__(parent)
+        self.session = session
+        self.mapper = mapper
+        self.clock = clock
+        self.hold = HoldToExit(self.HOLD_EXIT_S)
+        self._started_wall: Optional[float] = None
+        self._now_ts: Optional[float] = None
+        self._finished = False
+        self.setWindowTitle("Recentrar")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("Pantalla de recentrado")
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self.tick)
+
+    def start(self):
+        self._started_wall = self.clock()
+        self._timer.start()
+        self.setFocus()
+
+    def stop(self):
+        self._timer.stop()
+
+    def on_frame(self, frame):
+        if self._finished:
+            return
+        self._now_ts = frame.timestamp
+        valid = bool(frame.face_found and not frame.eyes_closed and frame.features is not None)
+        self.session.update(frame.timestamp, frame.features, valid, bool(frame.eyes_closed), self.mapper)
+        self._check_finished()
+        self.update()
+
+    def on_tracker_failed(self, message: str):
+        self._finish_aborted(f"Se perdió el seguimiento: {message}")
+
+    def tick(self, now: Optional[float] = None):
+        now = self.clock() if now is None else now
+        if self._finished:
+            return
+        if self.hold.completed(now):
+            self._finish_aborted("Recentrado cancelado.")
+            return
+        if self._started_wall is not None and now - self._started_wall > self.session.max_wait_s + 1.0:
+            self._finish_aborted("No se pudo recentrar: no llegan cuadros de la cámara.")
+            return
+        self.update()
+
+    def _check_finished(self):
+        if not self.session.finished:
+            return
+        if self.session.phase == "done":
+            self._finished = True
+            self._timer.stop()
+            self.completed.emit(self.session.offset)
+        else:
+            self._finish_aborted(self.session.message or "No se pudo recentrar.")
+
+    def _finish_aborted(self, message: str):
+        if self._finished:
+            return
+        self._finished = True
+        self._timer.stop()
+        self.aborted.emit(message)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if not event.isAutoRepeat():
+                self.hold.press(self.clock())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if not event.isAutoRepeat():
+                self.hold.release()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), BG)
+        w, h = self.width(), self.height()
+        scale = max(0.6, h / 1080.0)
+        now = self.clock()
+        c = QPointF(w / 2.0, h / 2.0)
+        pulse = 0.5 + 0.5 * math.sin(now * 5.0)
+        for k, base in enumerate((54, 38, 24)):
+            col = QColor(ACCENT)
+            col.setAlpha(40 + 30 * k + int(30 * pulse * (k == 0)))
+            p.setPen(QPen(col, 3))
+            p.setBrush(Qt.NoBrush)
+            r = (base + 6 * pulse * (k == 0)) * scale
+            p.drawEllipse(c, r, r)
+        prog = self.session.progress(self._now_ts) if self._now_ts is not None else 0.0
+        if prog > 0:
+            p.setPen(QPen(OK_GREEN, 5))
+            p.drawArc(QRectF(c.x() - 30 * scale, c.y() - 30 * scale, 60 * scale, 60 * scale), 90 * 16, -int(360 * 16 * prog))
+        p.setPen(Qt.NoPen)
+        p.setBrush(ACCENT)
+        p.drawEllipse(c, 12 * scale, 12 * scale)
+        title_h = min(0.24 * h, 170)
+        t = QRectF(w * 0.15, h * 0.30 - title_h / 2, w * 0.70, title_h)
+        p.setPen(TEXT)
+        p.setFont(_font(26 * scale, True))
+        p.drawText(QRectF(t.x(), t.y(), t.width(), t.height() * 0.45), Qt.AlignCenter, "Recentrar")
+        p.setPen(TEXT_SECONDARY)
+        p.setFont(_font(14 * scale))
+        p.drawText(
+            QRectF(t.x(), t.y() + t.height() * 0.45, t.width(), t.height() * 0.4),
+            Qt.AlignCenter,
+            "Mira el punto central hasta que se complete el círculo.",
+        )
+        notice_w = min(w * 0.5, 560)
+        n = QRectF((w - notice_w) / 2, h * 0.70 - 32, notice_w, 64)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(24, 24, 41, 215))
+        p.drawRoundedRect(n, 14, 14)
+        p.setPen(TEXT_SECONDARY)
+        p.setFont(_font(11))
+        p.drawText(n.adjusted(16, 0, -16, -10), Qt.AlignCenter | Qt.TextWordWrap, "Mantén presionada ESC para cancelar")
+        hp = self.hold.progress(now)
+        if hp > 0:
+            bar = QRectF(n.x() + 14, n.bottom() - 10, (n.width() - 28) * hp, 5)
+            p.setBrush(ACCENT)
+            p.drawRoundedRect(bar, 2.5, 2.5)
+        p.end()
+
+
+# ------------------------------------------------------ diálogo de resultado
+def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 0) -> str:
+    """Explica qué error se muestra al final de la calibración."""
+    if source == "validation":
+        text = f"Medido en {points} puntos de validación nuevos, no usados para calibrar (error real)."
+        if cv_px is not None:
+            text += f" Validación cruzada de los 9 puntos: ~{int(round(cv_px))} px."
+        return text
+    if source == "cv":
+        return "Estimado con validación cruzada (dejando un punto fuera); no hubo puntos de validación suficientes."
+    return "Error de ajuste sobre los propios puntos de calibración (optimista)."
+
+
+class CalibrationResultDialog(QDialog):
+    """"Calibración completada. Error estimado: ~N px" con Aceptar / Repetir y de dónde sale el error."""
+
+    def __init__(self, error_px: float, parent=None, source: str = "", cv_px: Optional[float] = None, points: int = 0):
         super().__init__(parent)
         self.setWindowTitle("Calibración completada")
         self.setModal(True)
         self.error_px = error_px
+        self.source = source
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
@@ -445,6 +605,12 @@ class CalibrationResultDialog(QDialog):
         self.message_label.setWordWrap(True)
         self.message_label.setAccessibleName("Resultado de la calibración")
         layout.addWidget(self.message_label)
+        self.source_label = QLabel(error_source_text(source, cv_px, points) if source else "")
+        self.source_label.setObjectName("description")
+        self.source_label.setWordWrap(True)
+        self.source_label.setAccessibleName("Origen del error estimado")
+        self.source_label.setVisible(bool(source))
+        layout.addWidget(self.source_label)
         self.warning_label = QLabel(
             f"El error estimado supera {WARN_ERROR_PX} px: el control podría ser impreciso. "
             "Te recomendamos repetir la calibración con mejor iluminación y sin mover la cabeza."
@@ -502,7 +668,7 @@ class CalibrationDialog(QDialog):
         screen=None,
         clock: Callable[[], float] = time.monotonic,
         result_dialog_exec: Optional[Callable[[CalibrationResultDialog], bool]] = None,
-        validation: bool = False,
+        validation: bool = True,
         record_dir: Optional[str] = None,
     ):
         super().__init__(parent)
@@ -773,8 +939,14 @@ class CalibrationDialog(QDialog):
         self._close_screen()
         self._save_recording("completed")
         error = mapper.estimated_error_px
-        logger.info("Calibración completada: %s", mapper.metrics)
-        dlg = CalibrationResultDialog(error, self)
+        logger.info("Calibración completada (error mostrado: %s): %s", mapper.error_source, mapper.metrics)
+        dlg = CalibrationResultDialog(
+            error,
+            self,
+            source=mapper.error_source,
+            cv_px=mapper.metrics.get("cv_rmse_px"),
+            points=int(mapper.metrics.get("validation_points", 0)),
+        )
         accepted = self._result_dialog_exec(dlg)
         if accepted:
             try:

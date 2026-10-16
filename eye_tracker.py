@@ -45,6 +45,7 @@ FEATURE_NAMES = (
     "interocular",  # distancia entre esquinas externas / ancho del cuadro (proxy de profundidad)
     "yaw",  # radianes, desde la matriz facial (0 si no hay)
     "pitch",  # radianes
+    "roll",  # radianes (inclinación lateral de la cabeza)
 )
 FEATURE_DIM = len(FEATURE_NAMES)
 
@@ -126,17 +127,24 @@ def _iris_in_eye_frame(landmarks, corners, iris_idx, size) -> Tuple[float, float
     return float(np.dot(rel, u) / width), float(np.dot(rel, n) / width)
 
 
-def yaw_pitch_from_matrix(matrix: Optional[np.ndarray]) -> Tuple[float, float]:
-    """Yaw y pitch aproximados (radianes) desde la matriz de transformación facial 4x4."""
+def head_angles_from_matrix(matrix: Optional[np.ndarray]) -> Tuple[float, float, float]:
+    """Yaw, pitch y roll aproximados (radianes) desde la matriz de transformación facial 4x4."""
     if matrix is None:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     m = np.asarray(matrix, dtype=float)
-    if m.shape[0] < 3 or m.shape[1] < 3:
-        return 0.0, 0.0
+    if m.ndim != 2 or m.shape[0] < 3 or m.shape[1] < 3:
+        return 0.0, 0.0, 0.0
     r = m[:3, :3]
     pitch = math.atan2(r[2, 1], r[2, 2])
     yaw = math.atan2(-r[2, 0], math.hypot(r[2, 1], r[2, 2]))
-    return float(yaw), float(pitch)
+    roll = math.atan2(r[1, 0], r[0, 0])
+    return float(yaw), float(pitch), float(roll)
+
+
+def yaw_pitch_from_matrix(matrix: Optional[np.ndarray]) -> Tuple[float, float]:
+    """Yaw y pitch aproximados (radianes) desde la matriz de transformación facial 4x4."""
+    yaw, pitch, _ = head_angles_from_matrix(matrix)
+    return yaw, pitch
 
 
 def extract_features(landmarks: np.ndarray, size: Tuple[int, int], matrix: Optional[np.ndarray] = None) -> np.ndarray:
@@ -147,8 +155,10 @@ def extract_features(landmarks: np.ndarray, size: Tuple[int, int], matrix: Optio
     nose_x, nose_y = float(lm[NOSE_TIP, 0]), float(lm[NOSE_TIP, 1])
     c1, c2 = _px(landmarks, OUTER_EYE_CORNERS, size)
     interocular = float(np.linalg.norm(c1 - c2) / size[0])
-    yaw, pitch = yaw_pitch_from_matrix(matrix)
-    return np.array([r_along, r_perp, l_along, l_perp, nose_x, nose_y, interocular, yaw, pitch], dtype=float)
+    yaw, pitch, roll = head_angles_from_matrix(matrix)
+    return np.array(
+        [r_along, r_perp, l_along, l_perp, nose_x, nose_y, interocular, yaw, pitch, roll], dtype=float
+    )
 
 
 def build_tracking_frame(

@@ -18,7 +18,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from gaze_session import default_variants, evaluate, format_table, load_session, synthesize_session  # noqa: E402
+from gaze_session import (  # noqa: E402
+    default_variants,
+    evaluate,
+    fit_label,
+    format_table,
+    load_session,
+    model_variants,
+    synthesize_session,
+)
 
 
 def describe(session) -> str:
@@ -46,6 +54,7 @@ def main(argv=None) -> int:
     parser.add_argument("--synthetic", action="store_true", help="usar una sesión sintética")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--distance-cm", type=float, default=60.0)
+    parser.add_argument("--quick", action="store_true", help="omitir la comparativa de modelos")
     args = parser.parse_args(argv)
     if not args.session and not args.synthetic:
         parser.error("indica un archivo de sesión o --synthetic")
@@ -56,12 +65,21 @@ def main(argv=None) -> int:
         return 1
     print(describe(session))
     print()
+    distance_mm = args.distance_cm * 10.0
     try:
-        rows = evaluate(session, default_variants(), distance_mm=args.distance_cm * 10.0)
+        rows = evaluate(session, default_variants(), distance_mm=distance_mm)
+        model_rows = [] if args.quick else evaluate(session, model_variants(), distance_mm=distance_mm)
     except ValueError as e:
         print(e)
         return 1
+    print("Antes / después y filtros (parte B)")
     print(format_table(rows))
+    if model_rows:
+        print()
+        print("Modelos (parte C), ordenados por desvío en validación; todos con el filtro nuevo")
+        model_rows.sort(key=lambda r: (r["bias_px"] != r["bias_px"], r["bias_px"]))
+        print(format_table(model_rows))
+        print(f"Ajuste por defecto de la aplicación: {fit_label({})}")
     print()
     print("Desvío: |cursor medio - objetivo| por punto; jitter: desviación típica 2D del cursor en la fijación;")
     print("latencia: tiempo hasta el 90 % de un salto de 400 px sin ruido; LOO: validación cruzada en calibración.")
