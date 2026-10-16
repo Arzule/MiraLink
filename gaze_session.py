@@ -98,6 +98,9 @@ class SessionRecorder:
         self._target: List[Tuple[float, float]] = []
         self._landmarks: List[Optional[np.ndarray]] = []
         self._matrix: List[Optional[np.ndarray]] = []
+        self._fps: List[float] = []
+        self._camera_info = ""
+        self._image_size: Optional[Tuple[int, int]] = None
 
     def __len__(self) -> int:
         return len(self._t)
@@ -122,6 +125,20 @@ class SessionRecorder:
             self._landmarks.append(None if lm is None else np.asarray(lm, dtype=np.float32)[:, :2])
         mx = getattr(frame, "matrix", None)
         self._matrix.append(None if mx is None else np.asarray(mx, dtype=np.float32))
+        self._fps.append(float(getattr(frame, "fps", 0.0) or 0.0))
+        self._camera_info = getattr(frame, "camera_info", "") or self._camera_info
+        image = getattr(frame, "image", None)
+        if image is not None:
+            self._image_size = (int(image.shape[1]), int(image.shape[0]))
+
+    def camera_meta(self) -> dict:
+        """Lo que entregó la cámara: resolución real, formato y fps medidos con timestamps."""
+        fps = [f for f in self._fps if f > 0]
+        return {
+            "info": self._camera_info,
+            "image_size": list(self._image_size) if self._image_size else None,
+            "fps_median": float(np.median(fps)) if fps else None,
+        }
 
     def arrays(self) -> Dict[str, np.ndarray]:
         n = len(self._t)
@@ -142,6 +159,7 @@ class SessionRecorder:
             "point": np.asarray(self._point, dtype=np.int16),
             "phase": np.asarray(self._phase, dtype=np.int8),
             "target": np.asarray(self._target, dtype=float).reshape(n, 2),
+            "fps": np.asarray(self._fps, dtype=np.float32),
         }
         matrix = np.full((n, 4, 4), np.nan, dtype=np.float32)
         for i, m in enumerate(self._matrix):
@@ -170,7 +188,7 @@ class SessionRecorder:
             path = os.path.join(directory, f"session_{stamp}_{k}.npz")
             k += 1
         arrays = self.arrays()
-        meta = dict(self.meta, n_frames=len(self))
+        meta = dict(self.meta, n_frames=len(self), camera=self.camera_meta())
         tmp = path + ".tmp.npz"
         np.savez_compressed(tmp, meta=np.array(json.dumps(meta, ensure_ascii=False)), **arrays)
         os.replace(tmp, path)

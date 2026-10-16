@@ -84,6 +84,8 @@ class TrackingFrame:
     eyes_closed: bool = False  # estado del BlinkDetector
     blink_event: Optional[BlinkEvent] = None  # parpadeo que terminó en este cuadro
     image: Optional[np.ndarray] = None  # cuadro BGR sin espejo (para previsualizaciones)
+    fps: float = 0.0  # cuadros por segundo medidos con los timestamps (FpsMeter); 0 = aún sin medir
+    camera_info: str = ""  # p. ej. "1280x720 MJPG" (CameraSource.describe)
 
 
 # --------------------------------------------------------- funciones puras
@@ -282,27 +284,126 @@ class BlinkDetector:
 
 
 # ------------------------------------------------------------- hardware
+FALLBACK_SIZE = (640, 480)
+MIN_CAMERA_FPS = 25.0  # por debajo la detección ocular se degrada (hallazgo de la prueba manual)
+MIN_PROBE_FPS = 24.0  # una resolución alta que no llega a esto al abrir se descarta
+
+
+def _fourcc_text(value) -> str:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return ""
+    text = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
+    return text if text.isprintable() and text.strip() else ""
+
+
 class CameraSource:
-    """Captura de cámara con cv2.VideoCapture (DirectShow), 640x480 a 30 fps."""
+    """Captura de cámara con cv2.VideoCapture (DirectShow) a 30 fps.
 
-    def __init__(self, index: int = 0, width: int = 640, height: int = 480, fps: int = 30):
+    640x480 por defecto. Con otra resolución (p. ej. 1280x720) pide MJPG (muchas webcams solo dan
+    30 fps a 720p comprimiendo) y sondea `probe_frames` cuadros midiendo los fps con el reloj: si la
+    cámara no entrega el tamaño pedido o baja de MIN_PROBE_FPS, vuelve a 640x480 sin MJPG y lo anota
+    en `fallback_reason`. Más resolución mejora la precisión del iris pero cuesta CPU (MediaPipe).
+    `cv2_module` y `clock` se inyectan en los tests (nunca se abre la cámara real en ellos).
+    """
+
+    def __init__(
+        self,
+        index: int = 0,
+        width: int = FALLBACK_SIZE[0],
+        height: int = FALLBACK_SIZE[1],
+        fps: int = 30,
+        cv2_module=None,
+        clock: Callable[[], float] = time.monotonic,
+        probe_frames: int = 12,
+    ):
         self.index = index
-        self.width = width
-        self.height = height
+        self.width = int(width)
+        self.height = int(height)
         self.fps = fps
+        self._cv2 = cv2_module
+        self._clock = clock
+        self.probe_frames = max(3, int(probe_frames))
         self._cap = None
+        self.actual_size: Optional[Tuple[int, int]] = None
+        self.fourcc = ""
+        self.measured_fps = 0.0
+        self.fallback_reason = ""
 
-    def open(self):
-        import cv2
-
+    def _open_capture(self, cv2, size: Tuple[int, int], mjpg: bool):
         cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             cap.release()
-            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. Revisa que no esté en uso por otra aplicación.")
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            return None
+        if mjpg:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # antes del tamaño
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
         cap.set(cv2.CAP_PROP_FPS, self.fps)
+        return cap
+
+    def _probe(self, cap) -> Tuple[bool, Optional[Tuple[int, int]], float]:
+        """Lee unos cuadros: (ok, tamaño entregado, fps medidos con la mediana de los intervalos)."""
+        times, size = [], None
+        for _ in range(self.probe_frames):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return False, size, 0.0
+            size = (int(frame.shape[1]), int(frame.shape[0]))
+            times.append(self._clock())
+        gaps = np.diff(times[1:])  # el primer cuadro suele tardar más (exposición automática)
+        gaps = gaps[gaps > 0]
+        fps = float(1.0 / np.median(gaps)) if len(gaps) else 0.0
+        return True, size, fps
+
+    def open(self):
+        if self._cv2 is None:
+            import cv2
+
+            self._cv2 = cv2
+        cv2 = self._cv2
+        requested = (self.width, self.height)
+        high = requested != FALLBACK_SIZE
+        cap = self._open_capture(cv2, requested, mjpg=high)
+        if cap is None:
+            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. Revisa que no esté en uso por otra aplicación.")
+        ok, size, fps = self._probe(cap)
+        if high and (not ok or size != requested or fps < MIN_PROBE_FPS):
+            if not ok:
+                reason = f"la cámara no entregó imagen a {requested[0]}x{requested[1]}"
+            elif size != requested:
+                reason = f"pedido {requested[0]}x{requested[1]}, la cámara entrega {size[0]}x{size[1]}"
+            else:
+                reason = f"{requested[0]}x{requested[1]} solo a {fps:.1f} fps"
+            logger.warning("Cámara %s: %s; se usa %dx%d", self.index, reason, *FALLBACK_SIZE)
+            cap.release()
+            cap = self._open_capture(cv2, FALLBACK_SIZE, mjpg=False)
+            if cap is None:
+                raise RuntimeError(f"No se pudo reabrir la cámara {self.index} a {FALLBACK_SIZE[0]}x{FALLBACK_SIZE[1]}.")
+            ok, size, fps = self._probe(cap)
+            self.fallback_reason = reason
+        if not ok:
+            cap.release()
+            raise RuntimeError(f"La cámara {self.index} se abrió pero no entrega imagen.")
+        self.actual_size, self.measured_fps = size, fps
+        self.fourcc = _fourcc_text(cap.get(cv2.CAP_PROP_FOURCC))
         self._cap = cap
+        logger.info(
+            "Cámara %s: %dx%d %s a %.1f fps medidos (pedido %dx%d)",
+            self.index, size[0], size[1], self.fourcc or "?", fps, requested[0], requested[1],
+        )
+
+    def describe(self) -> str:
+        """Resumen legible de lo que entrega la cámara (para la UI y las sesiones grabadas)."""
+        if self.actual_size is None:
+            return ""
+        text = f"{self.actual_size[0]}x{self.actual_size[1]}"
+        if self.fourcc:
+            text += f" {self.fourcc}"
+        if self.fallback_reason:
+            text += f" (sin {self.width}x{self.height}: {self.fallback_reason})"
+        return text
 
     def read(self):
         """Devuelve (ok, cuadro BGR)."""
@@ -408,6 +509,21 @@ class FaceTracker:
         self._landmarker.close()
 
 
+class FpsMeter:
+    """Cuadros por segundo en una ventana móvil de timestamps (no asume una tasa fija)."""
+
+    def __init__(self, window_s: float = 2.0):
+        self.window_s = window_s
+        self._ts: deque = deque()
+
+    def update(self, timestamp: float) -> float:
+        self._ts.append(float(timestamp))
+        while len(self._ts) > 2 and self._ts[-1] - self._ts[0] > self.window_s:
+            self._ts.popleft()
+        span = self._ts[-1] - self._ts[0]
+        return (len(self._ts) - 1) / span if len(self._ts) >= 5 and span > 0 else 0.0
+
+
 class EyeTrackingPipeline:
     """Cámara -> FaceTracker -> BlinkDetector. Los tres se inyectan (versiones falsas en tests)."""
 
@@ -416,6 +532,9 @@ class EyeTrackingPipeline:
         self.tracker = tracker
         self.detector = detector or BlinkDetector()
         self.clock = clock
+        self.fps_meter = FpsMeter()
+        describe = getattr(camera, "describe", None)
+        self.camera_info = describe() if callable(describe) else ""
 
     def step(self) -> Optional[TrackingFrame]:
         """Procesa un cuadro. Devuelve None si la cámara no entregó imagen."""
@@ -428,6 +547,8 @@ class EyeTrackingPipeline:
         event = self.detector.update(ts, frame.ear_mean, frame.face_found)
         frame.eyes_closed = self.detector.is_closed
         frame.blink_event = event
+        frame.fps = self.fps_meter.update(ts)
+        frame.camera_info = self.camera_info
         return frame
 
 
@@ -453,11 +574,13 @@ def _make_tracker_thread_class():
             camera_factory: Optional[Callable[[int], object]] = None,
             tracker_factory: Optional[Callable[[Optional[str]], object]] = None,
             clock: Callable[[], float] = time.monotonic,
+            camera_size: Tuple[int, int] = FALLBACK_SIZE,
         ):
             super().__init__(parent)
             self.camera_index = camera_index
             self.model_path = model_path
-            self._camera_factory = camera_factory or CameraSource
+            w, h = int(camera_size[0]), int(camera_size[1])
+            self._camera_factory = camera_factory or (lambda i: CameraSource(i, w, h))
             self._tracker_factory = tracker_factory or FaceTracker
             self._clock = clock
             self._stop_requested = False
@@ -476,6 +599,7 @@ def _make_tracker_thread_class():
                 logger.info("Cámara %s abierta", self.camera_index)
                 pipeline = EyeTrackingPipeline(camera, tracker, clock=self._clock)
                 misses = 0
+                last_fps_log = None
                 while not self._stop_requested:
                     frame = pipeline.step()
                     if frame is None:
@@ -485,6 +609,10 @@ def _make_tracker_thread_class():
                         self.msleep(10)
                         continue
                     misses = 0
+                    if frame.fps and (last_fps_log is None or frame.timestamp - last_fps_log >= 10.0):
+                        last_fps_log = frame.timestamp
+                        log = logger.warning if frame.fps < MIN_CAMERA_FPS else logger.info
+                        log("Cámara %s: %.1f fps medidos con timestamps", self.camera_index, frame.fps)
                     self.frame_ready.emit(frame)
             except Exception as e:  # noqa: BLE001 - se informa a la GUI
                 logger.exception("Error en el hilo de seguimiento")
@@ -544,7 +672,7 @@ def draw_debug_overlay(image: np.ndarray, frame: TrackingFrame, blink_durations_
     return out
 
 
-def run_tracker_debug(camera_index: int = 0) -> int:
+def run_tracker_debug(camera_index: int = 0, camera_size: Tuple[int, int] = FALLBACK_SIZE) -> int:
     """Ventana de OpenCV con la cámara y el seguimiento. Prueba manual de la etapa 2."""
     import cv2
 
@@ -553,7 +681,7 @@ def run_tracker_debug(camera_index: int = 0) -> int:
     except ModelNotFoundError as e:
         print(e)
         return 1
-    camera = CameraSource(camera_index)
+    camera = CameraSource(camera_index, camera_size[0], camera_size[1])
     try:
         camera.open()
     except RuntimeError as e:

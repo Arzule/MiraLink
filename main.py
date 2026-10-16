@@ -90,11 +90,27 @@ def check_environment():
     return 1
 
 
-def run_record_session(dialog_factory=None, record_dir=None):
+def parse_resolution(args):
+    """`--resolution 1280x720` -> (1280, 720); None si no se pidió. Lanza ValueError si es inválida."""
+    if "--resolution" not in args:
+        return None
+    i = args.index("--resolution")
+    try:
+        w, h = args[i + 1].lower().split("x")
+        size = (int(w), int(h))
+    except (IndexError, ValueError):
+        raise ValueError("Uso: --resolution ANCHOxALTO, por ejemplo --resolution 1280x720") from None
+    if size[0] <= 0 or size[1] <= 0:
+        raise ValueError("La resolución debe ser positiva")
+    return size
+
+
+def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
     """`--record-session`: calibración de 9 puntos + validación con 5 puntos nuevos, grabando cada cuadro.
 
     Cada intento (completado o cancelado) se guarda en sessions/session_<fecha>.npz. "Aceptar" también
-    guarda calibration.json, como en la calibración normal.
+    guarda calibration.json, como en la calibración normal. `resolution` sustituye camera.width/height
+    solo para esta grabación (si la cámara no la sostiene a ~30 fps se usa 640x480 y queda anotado).
     """
     from PySide6.QtWidgets import QApplication
 
@@ -112,7 +128,10 @@ def run_record_session(dialog_factory=None, record_dir=None):
         from calibration_ui import CalibrationDialog
 
         dialog_factory = CalibrationDialog
-    dialog = dialog_factory(load_config(), record_dir=record_dir)
+    config = load_config()
+    if resolution:
+        config.setdefault("camera", {}).update(width=int(resolution[0]), height=int(resolution[1]))
+    dialog = dialog_factory(config, record_dir=record_dir)
     dialog.finished.connect(app.quit)
     dialog.show()
     app.exec()
@@ -129,12 +148,18 @@ def run_record_session(dialog_factory=None, record_dir=None):
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if "--record-session" in args:
-        return run_record_session()
+        try:
+            resolution = parse_resolution(args)
+        except ValueError as e:
+            print(e)
+            return 2
+        return run_record_session(resolution=resolution)
     if "--tracker-debug" in args:
         from config_manager import load_config
         from eye_tracker import run_tracker_debug
 
-        return run_tracker_debug(load_config()["camera"]["device_index"])
+        cam = load_config()["camera"]
+        return run_tracker_debug(cam["device_index"], (cam["width"], cam["height"]))
     dry_run = "--dry-run" in args
     if "--config" in args:
         from PySide6.QtWidgets import QApplication

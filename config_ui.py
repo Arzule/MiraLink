@@ -453,6 +453,10 @@ class ConfigWindow(QMainWindow):
             config_getter=lambda: self._config.get("interaction", {}),
             dry_run=self.dry_run,
             camera_index_getter=lambda: int(self._config.get("camera", {}).get("device_index", 0)),
+            camera_size_getter=lambda: (
+                int(self._config.get("camera", {}).get("width", 640)),
+                int(self._config.get("camera", {}).get("height", 480)),
+            ),
         )
 
     def _on_control_clicked(self):

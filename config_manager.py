@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "version": 1,
-    "camera": {"device_index": 0},
+    "camera": {"device_index": 0, "width": 640, "height": 480},
     "interaction": {
         "dwell_hold_ms": 1200,
         "blink_click_ms": 250,
@@ -72,6 +72,12 @@ def _validate_config(config):
         validated["camera"]["device_index"] = device_index
     except Exception:
         validated["camera"]["device_index"] = DEFAULT_CONFIG["camera"]["device_index"]
+    # resolución pedida a la cámara (si no la entrega a ~30 fps, eye_tracker cae a 640x480)
+    for key, lo, hi in (("width", 160, 1920), ("height", 120, 1080)):
+        try:
+            validated["camera"][key] = _clamp(int(validated["camera"].get(key, DEFAULT_CONFIG["camera"][key])), lo, hi)
+        except Exception:
+            validated["camera"][key] = DEFAULT_CONFIG["camera"][key]
 
     # interaction
     if not isinstance(validated.get("interaction", {}), dict):
