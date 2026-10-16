@@ -35,9 +35,13 @@ class ConfigWindow(QMainWindow):
     config_saved = Signal(dict)
     config_changed = Signal(dict)
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, dry_run: bool = False):
         super().__init__()
         self.config_path = config_path
+        self.dry_run = dry_run
+        self.control_session = None
+        # Fábrica de la sesión de control (los tests inyectan una con piezas falsas)
+        self.control_session_factory = self._default_control_session
         self._config = load_config(config_path)
         self._save_label_timer = QTimer(self)
         self._save_label_timer.setSingleShot(True)
@@ -86,6 +90,7 @@ class ConfigWindow(QMainWindow):
         self.btn_font_plus.clicked.connect(self._on_font_plus)
         self.btn_calibrate.clicked.connect(self.calibrate_requested.emit)
         self.calibrate_requested.connect(self._open_calibration)
+        self.btn_control.clicked.connect(self._on_control_clicked)
         self.btn_save.clicked.connect(self._on_save_clicked)
 
     # ------------------------------------------------------------------ UI
@@ -200,31 +205,56 @@ class ConfigWindow(QMainWindow):
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.setSpacing(16)
 
-        # Left: buttons + save status
+        # Left: dos filas de botones (no caben tres en 960 px junto al bloque de letra)
         left = QWidget(footer)
-        left_layout = QHBoxLayout(left)
+        left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(16)
+        left_layout.setSpacing(12)
 
-        self.btn_calibrate = QPushButton("Calibrar Rastreador Ocular", left)
+        row1 = QWidget(left)
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(16)
+
+        self.btn_calibrate = QPushButton("Calibrar Rastreador Ocular", row1)
         self.btn_calibrate.setObjectName("btn_calibrate")
         self.btn_calibrate.setProperty("variant", "primary")
         self.btn_calibrate.setAccessibleName("Botón calibrar rastreador ocular")
         self.btn_calibrate.setMinimumHeight(48)
-        left_layout.addWidget(self.btn_calibrate)
+        row1_layout.addWidget(self.btn_calibrate)
 
-        self.btn_save = QPushButton("Guardar Configuración", left)
+        self.btn_save = QPushButton("Guardar Configuración", row1)
         self.btn_save.setObjectName("btn_save")
         self.btn_save.setProperty("variant", "secondary")
         self.btn_save.setAccessibleName("Botón guardar configuración")
         self.btn_save.setMinimumHeight(48)
-        left_layout.addWidget(self.btn_save)
+        row1_layout.addWidget(self.btn_save)
 
-        self.save_label = QLabel("", left)
+        self.save_label = QLabel("", row1)
         self.save_label.setObjectName("description")
         self.save_label.setAccessibleName("Mensaje de guardado")
-        left_layout.addWidget(self.save_label)
-        left_layout.addStretch()
+        row1_layout.addWidget(self.save_label)
+        row1_layout.addStretch()
+        left_layout.addWidget(row1)
+
+        row2 = QWidget(left)
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(0, 0, 0, 0)
+        row2_layout.setSpacing(16)
+
+        self.btn_control = QPushButton("Iniciar Control del Cursor", row2)
+        self.btn_control.setObjectName("btn_control")
+        self.btn_control.setProperty("variant", "primary")
+        self.btn_control.setAccessibleName("Botón iniciar o pausar el control del cursor")
+        self.btn_control.setMinimumHeight(48)
+        row2_layout.addWidget(self.btn_control)
+
+        self.control_label = QLabel("", row2)
+        self.control_label.setObjectName("description")
+        self.control_label.setWordWrap(True)
+        self.control_label.setAccessibleName("Estado del control del cursor")
+        row2_layout.addWidget(self.control_label, 1)
+        left_layout.addWidget(row2)
         footer_layout.addWidget(left, 1)
 
         # Right: font size block
@@ -373,6 +403,7 @@ class ConfigWindow(QMainWindow):
 
     def _open_calibration(self):
         """Abre el modal de calibración; recuerda la cámara elegida (se guarda con Guardar)."""
+        self._stop_control()  # la cámara no puede compartirse con la sesión de control
         dialog = self.calibration_dialog_factory()
         dialog.camera_selected.connect(self._on_camera_selected)
         dialog.exec()
@@ -383,6 +414,60 @@ class ConfigWindow(QMainWindow):
     def _on_camera_selected(self, index):
         self._config.setdefault("camera", {})["device_index"] = int(index)
         self._emit_config_changed()
+
+    # ------------------------------------------------------------ control del cursor
+    def _default_control_session(self):
+        from control_session import ControlSession
+
+        return ControlSession(
+            config_getter=lambda: self._config.get("interaction", {}),
+            dry_run=self.dry_run,
+            camera_index_getter=lambda: int(self._config.get("camera", {}).get("device_index", 0)),
+        )
+
+    def _on_control_clicked(self):
+        """Iniciar el control (valida calibración, escala y atajo) o alternar la pausa."""
+        session = self.control_session
+        if session is not None and session.running:
+            session.toggle_pause()
+            return
+        session = self.control_session_factory()
+        session.paused_changed.connect(self._on_paused_changed)
+        session.tracker_active_changed.connect(self.set_tracker_active)
+        session.failed.connect(self._on_control_failed)
+        ok, message = session.start()
+        if not ok:
+            self.control_label.setText(message)
+            session.deleteLater() if hasattr(session, "deleteLater") else None
+            return
+        self.control_session = session
+        if message:
+            self.control_label.setText(message)
+
+    def _on_paused_changed(self, paused: bool):
+        self.btn_control.setText("Iniciar Control del Cursor" if paused else "Pausar Control del Cursor")
+        suffix = " (modo simulación: no se mueve el cursor real)" if self.dry_run else ""
+        if paused:
+            self.control_label.setText(f"Control pausado. Ctrl+Alt+P o el botón lo reanudan.{suffix}")
+        else:
+            self.control_label.setText(f"Control activo. Ctrl+Alt+P pausa en cualquier momento.{suffix}")
+
+    def _on_control_failed(self, message: str):
+        self.btn_control.setText("Iniciar Control del Cursor")
+        self.control_label.setText(message)
+        self.control_session = None
+
+    def _stop_control(self):
+        session, self.control_session = self.control_session, None
+        if session is not None:
+            session.stop()
+        self.btn_control.setText("Iniciar Control del Cursor")
+        self.set_tracker_active(False)
+
+    def closeEvent(self, event):
+        """Al cerrar se detienen el tracker y el control y se libera el mouse."""
+        self._stop_control()
+        super().closeEvent(event)
 
     def _clear_save_label(self):
         self.save_label.setText("")

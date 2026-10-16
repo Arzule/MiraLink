@@ -90,22 +90,27 @@ def check_environment():
     return 1
 
 
-def main():
-    if "--tracker-debug" in sys.argv[1:]:
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--tracker-debug" in args:
         from config_manager import load_config
         from eye_tracker import run_tracker_debug
 
         return run_tracker_debug(load_config()["camera"]["device_index"])
-    if len(sys.argv) > 1 and sys.argv[1] == "--config":
+    dry_run = "--dry-run" in args
+    if "--config" in args:
         from PySide6.QtWidgets import QApplication
+
         from config_ui import ConfigWindow
 
-        app = QApplication(sys.argv)
-        win = ConfigWindow()
+        app = QApplication([sys.argv[0]])
+        win = ConfigWindow(dry_run=dry_run)
         win.show()
         return app.exec()
-    else:
-        return check_environment()
+    if dry_run:
+        print("--dry-run solo se usa junto con --config: python main.py --config --dry-run")
+        return 2
+    return check_environment()
 
 
 if __name__ == "__main__":
