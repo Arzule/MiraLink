@@ -169,6 +169,60 @@ class TestValidationMetrics(unittest.TestCase):
         self.assertLess(mapper.estimated_error_px, 100)
 
 
+class TestBalancedOrderAndEyesDefault(unittest.TestCase):
+    def test_balanced_order_covers_rows_and_columns_in_each_triplet(self):
+        rng = np.random.default_rng(0)
+        orders = {tuple(cal.balanced_order(rng)) for _ in range(30)}
+        self.assertGreater(len(orders), 5)  # es aleatorio
+        for order in orders:
+            self.assertEqual(sorted(order), list(range(9)))
+            self.assertTrue(cal.is_balanced_order(order))
+            rows = [i // 3 for i in order]
+            self.assertNotEqual(rows, sorted(rows))  # nunca por filas
+        self.assertTrue(cal.is_balanced_order(cal.BALANCED_ORDER))
+        self.assertFalse(cal.is_balanced_order(list(range(9))))
+
+    def test_session_presents_balanced_order_consistently(self):
+        s = CalibrationSession(W, H, order="balanced", rng=np.random.default_rng(3))
+        grid = cal.grid_points(W, H)
+        self.assertEqual(s.points, [grid[i] for i in s.order])
+        self.assertEqual(sorted(s.points), sorted(grid))
+        self.assertEqual(s.current_point, grid[s.order[0]])
+        self.assertEqual(CalibrationSession(W, H).points, grid)  # la clase sigue por filas por defecto
+        with self.assertRaises(ValueError):
+            CalibrationSession(W, H, order="espiral")
+        rng = np.random.default_rng(5)
+        t = 0.0
+        while not s.finished and t < 60:
+            s.update(t, synth_features(np.array([s.current_point]), rng)[0], True)
+            t += 1 / 30
+        res = s.result()
+        for g in range(9):
+            self.assertTrue(np.allclose(res.targets[res.groups == g], s.points[g]))
+
+    def test_default_fit_is_eyes_only(self):
+        self.assertEqual(DEFAULT_FIT["feature_set"], "eyes")
+        m = GazeMapper.from_fit_options()
+        self.assertEqual((m.feature_set, m.model, m.alpha_mode), ("eyes", "quad_reduced", "cv"))
+
+    def test_eyes_only_ignores_head_that_followed_the_gaze(self):
+        # caso de la sesión real: la cabeza bajó en la fila inferior y se quedó baja en la validación
+        x, y, groups, rng = make_dataset()
+        x[groups >= 6, 5] += 0.02  # nose_y: cabeza más baja en la última fila
+        x[groups >= 6, 8] += 0.03  # pitch
+        val_t = np.repeat(np.array(validation_points(W, H)), 30, axis=0)
+        val_x = synth_features(val_t, rng)
+        val_x[:, 5] += 0.02
+        val_x[:, 8] += 0.03
+        val_g = np.repeat(np.arange(5), 30)
+        errors = {}
+        for fs in ("compact", "eyes"):
+            m = GazeMapper(fs, alpha="cv", model="quad_reduced")
+            errors[fs] = m.fit(x, y, groups, val_x, val_t, val_g)["validation_px"]
+        self.assertLess(errors["eyes"], errors["compact"])
+        self.assertLess(errors["eyes"], 60)
+
+
 class TestRobustSamples(unittest.TestCase):
     def test_outliers_and_pose_are_removed(self):
         rng = np.random.default_rng(0)
@@ -265,7 +319,7 @@ class TestSerializationV2(unittest.TestCase):
         bad = dict(data, offset=[float("nan"), 0.0])
         with self.assertRaises(CalibrationError):
             GazeMapper.from_dict(bad, GEOM)
-        bad = dict(data, model="quad")  # pesos de quad_reduced con modelo quad
+        bad = dict(data, model="linear")  # pesos cuadráticos con un modelo lineal
         with self.assertRaises(CalibrationError):
             GazeMapper.from_dict(bad, GEOM)
         bad = dict(data, version=99)

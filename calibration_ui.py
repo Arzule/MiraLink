@@ -894,7 +894,9 @@ class CalibrationDialog(QDialog):
             screen = self._target_screen()
             geom = screen_geometry_from_qt(screen)
             val = validation_points(geom["width"], geom["height"]) if self.validation else None
-            session = CalibrationSession(geom["width"], geom["height"], validation=val)
+            # orden balanceado: un movimiento de cabeza no queda ligado a la fila/columna del punto
+            session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced")
+            logger.info("Orden de los puntos de calibración: %s", session.order)
             self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
             scr = CalibrationScreen(
                 session, dpr=float(screen.devicePixelRatio()), clock=self.clock, recorder=self.recorder
