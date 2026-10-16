@@ -7,7 +7,12 @@
     "dwell_hold_ms": 2000,
     "blink_click_ms": 350,
     "blink_release_ms": 320,
-    "smoothing_percent": 80
+    "smoothing_percent": 80,
+    "dwell_radius_px": 50,
+    "hold_enabled": true,
+    "blink_max_ms": 2000,
+    "freeze_after_blink_ms": 150,
+    "hold_timeout_s": 30
   },
   "ui": {
     "theme": "default",

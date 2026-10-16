@@ -40,6 +40,19 @@ class TestConfigUISmoke(unittest.TestCase):
             def on_cal():
                 emitted.append(True)
 
+            class StubDialog:
+                # Evita abrir el modal real (sondearía la cámara) en las pruebas
+                class _Sig:
+                    def connect(self, *_a):
+                        pass
+
+                camera_selected = _Sig()
+                accepted_mapper = None
+
+                def exec(self):
+                    return 0
+
+            win.calibration_dialog_factory = StubDialog
             win.calibrate_requested.connect(on_cal)
             win.btn_calibrate.click()
             self.assertTrue(len(emitted) > 0)

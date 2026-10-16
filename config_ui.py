@@ -42,6 +42,8 @@ class ConfigWindow(QMainWindow):
         self._save_label_timer = QTimer(self)
         self._save_label_timer.setSingleShot(True)
         self._save_label_timer.timeout.connect(self._clear_save_label)
+        # Fábrica del modal de calibración (los tests inyectan una con tracker falso)
+        self.calibration_dialog_factory = self._default_calibration_dialog
 
         self.setWindowTitle("MiraLink - Configuración")
         self.setMinimumSize(960, 720)
@@ -83,6 +85,7 @@ class ConfigWindow(QMainWindow):
         self.btn_font_minus.clicked.connect(self._on_font_minus)
         self.btn_font_plus.clicked.connect(self._on_font_plus)
         self.btn_calibrate.clicked.connect(self.calibrate_requested.emit)
+        self.calibrate_requested.connect(self._open_calibration)
         self.btn_save.clicked.connect(self._on_save_clicked)
 
     # ------------------------------------------------------------------ UI
@@ -362,6 +365,24 @@ class ConfigWindow(QMainWindow):
             self.status_badge.setText("RASTREADOR OCULAR ACTIVO")
         else:
             self.status_badge.setText("RASTREADOR OCULAR INACTIVO")
+
+    def _default_calibration_dialog(self):
+        from calibration_ui import CalibrationDialog
+
+        return CalibrationDialog(self._config, parent=self)
+
+    def _open_calibration(self):
+        """Abre el modal de calibración; recuerda la cámara elegida (se guarda con Guardar)."""
+        dialog = self.calibration_dialog_factory()
+        dialog.camera_selected.connect(self._on_camera_selected)
+        dialog.exec()
+        if getattr(dialog, "accepted_mapper", None) is not None:
+            self.save_label.setText("Calibración guardada")
+            self._save_label_timer.start(2500)
+
+    def _on_camera_selected(self, index):
+        self._config.setdefault("camera", {})["device_index"] = int(index)
+        self._emit_config_changed()
 
     def _clear_save_label(self):
         self.save_label.setText("")
