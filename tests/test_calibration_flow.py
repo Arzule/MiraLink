@@ -329,7 +329,11 @@ class TestCalibrationFlow(FlowBase):
         self.assertFalse(os.path.isfile(self.cal_path))
         self.assertEqual(self.registry.open_now, 1)  # la previsualización sigue con la misma cámara
         dlg.reject()
-        self.assertTrue(self.wait_until(lambda: self.registry.open_now == 0))
+        self.assertTrue(
+            self.wait_until(lambda: self.registry.open_now == 0),
+            f"abiertas={self.registry.open_now} aperturas={self.registry.opens} "
+            f"hilos={[(t.isRunning(), t.isFinished()) for t in self.threads]}",
+        )
         win.close()
 
     def test_closing_config_window_during_calibration_releases_camera(self):

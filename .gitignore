@@ -6,3 +6,4 @@ calibration.json
 .vscode/
 models/*.task
 logs/
+sessions/

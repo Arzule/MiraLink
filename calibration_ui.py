@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from calibration import (
+    STAGE_VALIDATION,
     WARN_ERROR_PX,
     CalibrationSession,
     GazeMapper,
@@ -35,6 +36,7 @@ from calibration import (
     fit_session,
     save_calibration,
     screen_geometry_from_qt,
+    validation_points,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,12 +166,15 @@ class CalibrationScreen(QWidget):
         feature_set: str = "compact",
         clock: Callable[[], float] = time.monotonic,
         parent=None,
+        recorder=None,
     ):
         super().__init__(parent)
         self.session = session
         self.dpr = dpr if dpr > 0 else 1.0
         self.feature_set = feature_set
         self.clock = clock
+        self.recorder = recorder  # gaze_session.SessionRecorder en --record-session
+        self._layout_stage = session.stage
         self.hold = HoldToExit(self.HOLD_EXIT_S)
         self._last_frame_wall = -1e9
         self._finished = False
@@ -198,9 +203,12 @@ class CalibrationScreen(QWidget):
             return
         self._last_frame_wall = self.clock()
         self.mini.on_frame(frame)
+        if self.recorder is not None:
+            self.recorder.add(frame, self.session)  # con el punto que se mostraba al llegar el cuadro
         valid = bool(frame.face_found and not frame.eyes_closed and frame.features is not None)
         self.session.update(frame.timestamp, frame.features, valid)
         self._check_finished()
+        self._sync_layout()
         self.update()
 
     def on_tracker_failed(self, message: str):
@@ -217,6 +225,7 @@ class CalibrationScreen(QWidget):
         if now - self._last_frame_wall > self.FRAME_WATCHDOG_S:
             self.session.update(now, None, False)
             self._check_finished()
+        self._sync_layout()
         self.update()
 
     def _on_timer(self):
@@ -268,21 +277,43 @@ class CalibrationScreen(QWidget):
         x, y = self.session.points[index]
         return QPointF(x / self.dpr, y / self.dpr)
 
-    def layout_regions(self) -> Dict[str, QRectF]:
-        """Zonas de título, aviso ESC y mini previsualización, entre filas de puntos (10/50/90 %)."""
+    def logical_validation_point(self, index: int) -> QPointF:
+        x, y = self.session.validation[index]
+        return QPointF(x / self.dpr, y / self.dpr)
+
+    def layout_regions(self, stage: Optional[str] = None) -> Dict[str, QRectF]:
+        """Zonas de título, aviso ESC y mini previsualización.
+
+        Calibración: entre filas de puntos (10/50/90 %), título al 30 % y aviso al 70 %.
+        Validación (puntos al 30/56/70 %; la cuadrícula ya no se dibuja): título arriba (10 %) y
+        aviso abajo (92 %).
+        """
+        stage = stage or self.session.stage
         w, h = self.width(), self.height()
         title_h = min(0.24 * h, 170)
-        title = QRectF(w * 0.15, h * 0.30 - title_h / 2, w * 0.70, title_h)
         notice_w = min(w * 0.5, 560)
-        notice = QRectF((w - notice_w) / 2, h * 0.70 - 32, notice_w, 64)
-        mini = QRectF(w - 24 - 240, h * 0.70 - 135 / 2, 240, 135)
+        if stage == STAGE_VALIDATION:
+            title_y, band_y = 0.10, 0.92
+        else:
+            title_y, band_y = 0.30, 0.70
+        title = QRectF(w * 0.15, h * title_y - title_h / 2, w * 0.70, title_h)
+        notice = QRectF((w - notice_w) / 2, h * band_y - 32, notice_w, 64)
+        mini = QRectF(w - 24 - 240, h * band_y - 135 / 2, 240, 135)
         return {"title": title, "notice": notice, "mini": mini}
+
+    def _place_mini(self):
+        m = self.layout_regions()["mini"]
+        self.mini.setGeometry(int(m.x()), int(m.y()), 240, 135)
+
+    def _sync_layout(self):
+        """Recoloca la mini previsualización al pasar de calibración a validación."""
+        if self.session.stage != self._layout_stage:
+            self._layout_stage = self.session.stage
+            self._place_mini()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        regions = self.layout_regions()
-        m = regions["mini"]
-        self.mini.setGeometry(int(m.x()), int(m.y()), 240, 135)
+        self._place_mini()
 
     # ------------------------------------------------------------------ pintura
     def paintEvent(self, _event):
@@ -294,8 +325,9 @@ class CalibrationScreen(QWidget):
         scale = max(0.6, self.height() / 1080.0)
         now = self.clock()
 
-        # puntos inactivos tenues
-        for i in range(s.total):
+        validating = s.in_validation
+        # puntos inactivos tenues (en validación no se dibuja la cuadrícula: no distrae)
+        for i in range(0 if validating else s.total):
             if i == s.point_index and not s.finished:
                 continue
             c = self.logical_point(i)
@@ -308,7 +340,10 @@ class CalibrationScreen(QWidget):
 
         # punto activo con anillos y etiqueta
         if not s.finished:
-            c = self.logical_point(s.point_index)
+            if validating:
+                c = self.logical_validation_point(s.validation_index)
+            else:
+                c = self.logical_point(s.point_index)
             prog = s.phase_progress(now)
             pulse = 0.5 + 0.5 * math.sin(now * 5.0)
             for k, base in enumerate((54, 38, 24)):
@@ -337,12 +372,17 @@ class CalibrationScreen(QWidget):
         p.drawText(QRectF(t.x(), t.y(), t.width(), t.height() * 0.38), Qt.AlignCenter, "Calibrando Rastreador Ocular")
         p.setPen(TEXT_SECONDARY)
         p.setFont(_font(14 * scale))
-        p.drawText(
-            QRectF(t.x(), t.y() + t.height() * 0.38, t.width(), t.height() * 0.26),
-            Qt.AlignCenter,
-            "Mira cada punto resaltado hasta que se fije.",
+        subtitle = (
+            "Comprobando la precisión con puntos nuevos. Mira cada punto."
+            if validating
+            else "Mira cada punto resaltado hasta que se fije."
         )
-        pill_text = f"Punto {min(s.point_index + 1, s.total)} de {s.total}"
+        p.drawText(QRectF(t.x(), t.y() + t.height() * 0.38, t.width(), t.height() * 0.26), Qt.AlignCenter, subtitle)
+        if validating:
+            n_val = len(s.validation)
+            pill_text = f"Validación {min(s.validation_index + 1, n_val)} de {n_val}"
+        else:
+            pill_text = f"Punto {min(s.point_index + 1, s.total)} de {s.total}"
         p.setFont(_font(12 * scale, True))
         fm = p.fontMetrics()
         pw = fm.horizontalAdvance(pill_text) + 32
@@ -462,10 +502,16 @@ class CalibrationDialog(QDialog):
         screen=None,
         clock: Callable[[], float] = time.monotonic,
         result_dialog_exec: Optional[Callable[[CalibrationResultDialog], bool]] = None,
+        validation: bool = False,
+        record_dir: Optional[str] = None,
     ):
         super().__init__(parent)
         from calibration import default_calibration_path
 
+        self.record_dir = record_dir  # --record-session: graba cada intento en esta carpeta
+        self.validation = bool(validation or record_dir)
+        self.recorder = None
+        self.saved_sessions: List[str] = []
         self.config = config
         self.camera_lister = camera_lister
         self.tracker_factory = tracker_factory
@@ -477,6 +523,7 @@ class CalibrationDialog(QDialog):
         self.tracker = None
         self.calib_screen: Optional[CalibrationScreen] = None
         self._cameras_loaded = False
+        self._closing = False
 
         self.setWindowTitle("Calibrar Rastreador Ocular")
         self.setModal(True)
@@ -565,8 +612,8 @@ class CalibrationDialog(QDialog):
     # ---------------------------------------------------------------- tracker
     def _start_tracker(self):
         """El modal es el ÚNICO dueño del tracker (y de la cámara): la pantalla completa lo reutiliza."""
-        if self.tracker is not None:
-            return
+        if self.tracker is not None or self._closing:
+            return  # un arranque diferido que llega tras cerrar el modal no debe reabrir la cámara
         index = self.current_camera_index()
         logger.info("Modal: iniciando tracker (cámara %s)", index)
         try:
@@ -614,10 +661,15 @@ class CalibrationDialog(QDialog):
         self.setMinimumHeight(self.layout().totalHeightForWidth(self.width()))
         if not self._cameras_loaded:
             self._populate_cameras()
-        QTimer.singleShot(0, self._start_tracker)
+        self._closing = False
+        # con el modal como contexto: si se destruye antes, Qt descarta la llamada
+        QTimer.singleShot(0, self, self._start_tracker)
 
     def done(self, result):
         logger.info("Modal: cerrando (resultado %s)", result)
+        self._closing = True
+        if self.calib_screen is not None:
+            self._save_recording("closed")
         self._close_screen()
         self._stop_tracker()
         super().done(result)
@@ -642,8 +694,12 @@ class CalibrationDialog(QDialog):
         try:
             screen = self._target_screen()
             geom = screen_geometry_from_qt(screen)
-            session = CalibrationSession(geom["width"], geom["height"])
-            scr = CalibrationScreen(session, dpr=float(screen.devicePixelRatio()), clock=self.clock)
+            val = validation_points(geom["width"], geom["height"]) if self.validation else None
+            session = CalibrationSession(geom["width"], geom["height"], validation=val)
+            self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
+            scr = CalibrationScreen(
+                session, dpr=float(screen.devicePixelRatio()), clock=self.clock, recorder=self.recorder
+            )
             scr.completed.connect(self._on_completed)
             scr.aborted.connect(self._on_aborted)
             self.calib_screen = scr  # referencia fuerte: vive mientras ConfigWindow retenga el modal
@@ -673,14 +729,49 @@ class CalibrationDialog(QDialog):
             scr.hide()
             scr.deleteLater()
 
+    # ------------------------------------------------------------- grabación
+    def _make_recorder(self, screen, geom, session):
+        from gaze_session import SessionRecorder, make_session_meta
+
+        size = screen.physicalSize()
+        physical = (float(size.width()), float(size.height())) if size.width() > 0 else None
+        meta = make_session_meta(
+            geom,
+            session,
+            dpr=float(screen.devicePixelRatio()),
+            physical_mm=physical,
+            camera_index=self.current_camera_index(),
+            config=self.config,
+            extra={"screen_name": screen.name()},
+        )
+        return SessionRecorder(meta)
+
+    def _save_recording(self, outcome: str) -> Optional[str]:
+        """Guarda la sesión grabada (también si se canceló: sirve para analizar el fallo)."""
+        recorder, self.recorder = self.recorder, None
+        if recorder is None or len(recorder) == 0:
+            return None
+        recorder.meta["outcome"] = outcome
+        try:
+            path = recorder.save(self.record_dir)
+        except OSError as e:
+            logger.exception("No se pudo guardar la sesión grabada")
+            self.status_label.setText(f"No se pudo guardar la sesión grabada: {e}")
+            return None
+        self.saved_sessions.append(path)
+        logger.info("Sesión grabada en %s (%d cuadros)", path, len(recorder))
+        return path
+
     def _on_aborted(self, message: str):
         logger.warning("Calibración interrumpida: %s", message)
         self._close_screen()
-        self.status_label.setText(message)
+        path = self._save_recording("aborted")
+        self.status_label.setText(message + (f" Sesión guardada en {path}" if path else ""))
         self.show()
 
     def _on_completed(self, mapper: GazeMapper):
         self._close_screen()
+        self._save_recording("completed")
         error = mapper.estimated_error_px
         logger.info("Calibración completada: %s", mapper.metrics)
         dlg = CalibrationResultDialog(error, self)

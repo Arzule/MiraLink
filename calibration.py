@@ -218,6 +218,13 @@ PHASE_CAPTURING = "capturing"
 PHASE_DONE = "done"
 PHASE_ABORTED = "aborted"
 
+STAGE_CALIBRATION = "calibration"
+STAGE_VALIDATION = "validation"
+
+# Puntos de validación (fracción de la pantalla): centro desplazado y cuatro intermedios, todos
+# distintos de la cuadrícula 3x3 de calibración. Miden el error real con puntos no usados al ajustar.
+VALIDATION_LAYOUT = ((0.30, 0.30), (0.70, 0.30), (0.42, 0.56), (0.30, 0.70), (0.70, 0.70))
+
 
 def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[float, float]]:
     """Cuadrícula 3x3 con márgenes proporcionales, de izquierda a derecha y de arriba abajo."""
@@ -226,11 +233,23 @@ def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[flo
     return [(x, y) for y in ys for x in xs]
 
 
+def validation_points(width: int, height: int) -> List[Tuple[float, float]]:
+    """Los 5 puntos de validación en píxeles físicos (ver VALIDATION_LAYOUT)."""
+    return [(width * fx, height * fy) for fx, fy in VALIDATION_LAYOUT]
+
+
 @dataclass
 class CalibrationResult:
-    features: np.ndarray  # (n, 9)
+    features: np.ndarray  # (n, d)
     targets: np.ndarray  # (n, 2) píxeles físicos
     groups: np.ndarray  # (n,) índice del punto
+    val_features: Optional[np.ndarray] = None  # (m, d) muestras de los puntos de validación
+    val_targets: Optional[np.ndarray] = None
+    val_groups: Optional[np.ndarray] = None
+
+    @property
+    def has_validation(self) -> bool:
+        return self.val_features is not None and len(self.val_features) > 0
 
 
 class CalibrationSession:
@@ -239,6 +258,9 @@ class CalibrationSession:
     Por punto: `settle_s` de asentamiento (se descartan los cuadros) y `capture_s` de captura.
     Se descartan cuadros sin rostro u ojos cerrados. Si al terminar la captura hay menos de
     `min_samples` muestras válidas se reintenta el punto hasta `max_retries` veces y luego se aborta.
+
+    Con `validation` (lista de puntos) la sesión sigue con una fase de validación con el mismo
+    ritmo; un punto de validación sin muestras suficientes tras los reintentos se omite (no aborta).
     """
 
     def __init__(
@@ -250,13 +272,17 @@ class CalibrationSession:
         capture_s: float = 1.5,
         min_samples: int = 20,
         max_retries: int = 2,
+        validation: Optional[List[Tuple[float, float]]] = None,
     ):
         self.points = grid_points(width, height, margin)
+        self.validation = list(validation or [])
         self.settle_s = settle_s
         self.capture_s = capture_s
         self.min_samples = min_samples
         self.max_retries = max_retries
+        self.stage = STAGE_CALIBRATION
         self.point_index = 0
+        self.validation_index = 0
         self.retries = 0
         self.phase = PHASE_SETTLING
         self.message = ""
@@ -265,13 +291,27 @@ class CalibrationSession:
         self._done_features: List[np.ndarray] = []
         self._done_targets: List[np.ndarray] = []
         self._done_groups: List[np.ndarray] = []
+        self._val_features: List[np.ndarray] = []
+        self._val_targets: List[np.ndarray] = []
+        self._val_groups: List[np.ndarray] = []
 
     @property
     def total(self) -> int:
         return len(self.points)
 
     @property
+    def in_validation(self) -> bool:
+        return self.stage == STAGE_VALIDATION
+
+    @property
+    def active_index(self) -> int:
+        """Índice del punto activo dentro de su fase (calibración o validación)."""
+        return self.validation_index if self.in_validation else self.point_index
+
+    @property
     def current_point(self) -> Tuple[float, float]:
+        if self.in_validation:
+            return self.validation[min(self.validation_index, len(self.validation) - 1)]
         return self.points[min(self.point_index, self.total - 1)]
 
     @property
@@ -311,6 +351,9 @@ class CalibrationSession:
         return self.phase
 
     def _finish_attempt(self, timestamp: float):
+        if self.in_validation:
+            self._finish_validation_attempt(timestamp)
+            return
         n = len(self._samples)
         idx = self.point_index
         if n >= self.min_samples:
@@ -322,9 +365,13 @@ class CalibrationSession:
             self.retries = 0
             self.message = ""
             if idx + 1 >= self.total:
-                self.phase = PHASE_DONE
-                return
-            self.point_index = idx + 1
+                if not self.validation:
+                    self.phase = PHASE_DONE
+                    return
+                self.stage = STAGE_VALIDATION
+                self.validation_index = 0
+            else:
+                self.point_index = idx + 1
         else:
             if self.retries >= self.max_retries:
                 self.phase = PHASE_ABORTED
@@ -341,11 +388,43 @@ class CalibrationSession:
         self.phase = PHASE_SETTLING
         self._phase_start = timestamp
 
+    def _finish_validation_attempt(self, timestamp: float):
+        n = len(self._samples)
+        idx = self.validation_index
+        if n >= self.min_samples:
+            tx, ty = self.validation[idx]
+            self._val_features.append(np.vstack(self._samples))
+            self._val_targets.append(np.tile([tx, ty], (n, 1)))
+            self._val_groups.append(np.full(n, idx))
+            self.message = ""
+        elif self.retries < self.max_retries:
+            self.retries += 1
+            self.message = (
+                f"Validación {idx + 1}: pocas muestras válidas ({n}); reintentando ({self.retries}/{self.max_retries})."
+            )
+            self._samples = []
+            self.phase = PHASE_SETTLING
+            self._phase_start = timestamp
+            return
+        else:
+            self.message = f"Se omitió el punto de validación {idx + 1}: solo {n} muestras válidas."
+        self._samples = []
+        self.retries = 0
+        if idx + 1 >= len(self.validation):
+            self.phase = PHASE_DONE
+            return
+        self.validation_index = idx + 1
+        self.phase = PHASE_SETTLING
+        self._phase_start = timestamp
+
     def result(self) -> CalibrationResult:
         if self.phase != PHASE_DONE:
             raise RuntimeError("La calibración no terminó")
+        val = (None, None, None)
+        if self._val_features:
+            val = (np.vstack(self._val_features), np.vstack(self._val_targets), np.concatenate(self._val_groups))
         return CalibrationResult(
-            np.vstack(self._done_features), np.vstack(self._done_targets), np.concatenate(self._done_groups)
+            np.vstack(self._done_features), np.vstack(self._done_targets), np.concatenate(self._done_groups), *val
         )
 
 
