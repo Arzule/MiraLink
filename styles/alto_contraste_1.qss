@@ -107,3 +107,27 @@ QComboBox {
 QComboBox:focus, QSpinBox:focus, QSlider:focus {
     border: 3px solid #FFD500;
 }
+
+/* Popup del combo: reglas opacas; el selector con #card evita que la regla transparente lo alcance */
+QComboBox QAbstractItemView,
+#card QComboBox QAbstractItemView,
+#card QComboBox QAbstractItemView QWidget {
+    background-color: #000000;
+    color: #FFFFFF;
+    border: 2px solid #FFD500;
+    selection-background-color: #FFD500;
+    selection-color: #000000;
+    outline: 0;
+}
+
+QComboBox QAbstractItemView::item,
+#card QComboBox QAbstractItemView::item {
+    min-height: 48px;
+    padding: 4px 8px;
+}
+
+/* Botones − / + de tamaño de letra: tamaño fijo 48x48, sin relleno que los recorte */
+QPushButton#btn_font_minus, QPushButton#btn_font_plus {
+    min-height: 0px;
+    padding: 0px;
+}

@@ -31,15 +31,26 @@ class TestThemeManager(unittest.TestCase):
         self.assertNotIn("$FONT_SMALL", qss)
         self.assertNotIn("$FONT_BASE", qss)
         self.assertNotIn("$FONT_TITLE", qss)
-        self.assertIn("24px", qss)
-        self.assertIn("28px", qss)
-        self.assertIn("48px", qss)
+        self.assertIn("22pt", qss)
+        self.assertIn("36pt", qss)
+        self.assertIn("48px", qss)  # alto mínimo clicable sigue en px
 
     def test_load_theme_scale_1_0_values(self):
         qss = load_theme("default", 1.0)
-        self.assertIn("12px", qss)
-        self.assertIn("14px", qss)
-        self.assertIn("24px", qss)
+        self.assertIn("11pt", qss)
+        self.assertIn("18pt", qss)
+
+    def test_font_tokens_never_below_one_point(self):
+        qss = load_theme("default", 0.01)
+        self.assertNotIn("0pt", qss.replace("10pt", "").replace("20pt", ""))
+        self.assertIn("1pt", qss)
+
+    def test_no_px_font_sizes_in_themes(self):
+        import re
+
+        for t in list_themes():
+            qss = load_theme(t["id"], 1.0)
+            self.assertIsNone(re.search(r"font-size:\s*\d+px", qss), t["id"])
 
     def test_unknown_theme_falls_back_to_default(self):
         qss_unknown = load_theme("no_existe", 1.0)
