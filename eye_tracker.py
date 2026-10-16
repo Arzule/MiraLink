@@ -424,27 +424,47 @@ def _make_tracker_thread_class():
     from PySide6.QtCore import QThread, Signal
 
     class TrackerThread(QThread):
-        """Captura e inferencia en un hilo propio; emite TrackingFrame sin bloquear la GUI."""
+        """Captura e inferencia en un hilo propio; emite TrackingFrame sin bloquear la GUI.
+
+        Dueño único de la cámara: abre CameraSource al iniciar el hilo y la libera al terminar.
+        `camera_factory`, `tracker_factory` y `clock` son inyectables (versiones falsas en tests).
+        """
 
         frame_ready = Signal(object)  # TrackingFrame
         failed = Signal(str)  # mensaje de error legible
 
-        def __init__(self, camera_index: int = 0, model_path: Optional[str] = None, parent=None):
+        def __init__(
+            self,
+            camera_index: int = 0,
+            model_path: Optional[str] = None,
+            parent=None,
+            camera_factory: Optional[Callable[[int], object]] = None,
+            tracker_factory: Optional[Callable[[Optional[str]], object]] = None,
+            clock: Callable[[], float] = time.monotonic,
+        ):
             super().__init__(parent)
             self.camera_index = camera_index
             self.model_path = model_path
-            self._running = False
+            self._camera_factory = camera_factory or CameraSource
+            self._tracker_factory = tracker_factory or FaceTracker
+            self._clock = clock
+            self._stop_requested = False
+
+        def start(self, *args):
+            self._stop_requested = False  # antes de arrancar, para que un stop() temprano no se pierda
+            super().start(*args)
 
         def run(self):
-            camera = CameraSource(self.camera_index)
+            logger.info("Hilo de seguimiento: inicio (cámara %s)", self.camera_index)
+            camera = self._camera_factory(self.camera_index)
             tracker = None
             try:
-                tracker = FaceTracker(self.model_path)
+                tracker = self._tracker_factory(self.model_path)
                 camera.open()
-                pipeline = EyeTrackingPipeline(camera, tracker)
-                self._running = True
+                logger.info("Cámara %s abierta", self.camera_index)
+                pipeline = EyeTrackingPipeline(camera, tracker, clock=self._clock)
                 misses = 0
-                while self._running:
+                while not self._stop_requested:
                     frame = pipeline.step()
                     if frame is None:
                         misses += 1
@@ -459,19 +479,30 @@ def _make_tracker_thread_class():
                 self.failed.emit(str(e))
             finally:
                 camera.release()
+                logger.info("Cámara %s liberada", self.camera_index)
                 if tracker is not None:
                     tracker.close()
+                logger.info("Hilo de seguimiento: fin")
 
-        def stop(self):
-            """Pide detener el hilo y espera a que termine."""
-            self._running = False
-            self.wait(3000)
+        def stop(self, timeout_ms: int = 5000) -> bool:
+            """Pide detener el hilo y espera a que termine (y libere la cámara). True si terminó."""
+            self._stop_requested = True
+            finished = self.wait(timeout_ms)
+            if not finished:
+                logger.error("El hilo de seguimiento no terminó en %d ms", timeout_ms)
+            return finished
 
     return TrackerThread
 
 
+_TRACKER_THREAD_CLASS = None
+
+
 def TrackerThread(*args, **kwargs):  # noqa: N802 - fábrica para no importar Qt al importar el módulo
-    return _make_tracker_thread_class()(*args, **kwargs)
+    global _TRACKER_THREAD_CLASS
+    if _TRACKER_THREAD_CLASS is None:
+        _TRACKER_THREAD_CLASS = _make_tracker_thread_class()
+    return _TRACKER_THREAD_CLASS(*args, **kwargs)
 
 
 # ------------------------------------------------------- modo de depuración

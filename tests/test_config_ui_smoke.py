@@ -47,10 +47,14 @@ class TestConfigUISmoke(unittest.TestCase):
                         pass
 
                 camera_selected = _Sig()
+                finished = _Sig()
                 accepted_mapper = None
 
-                def exec(self):
-                    return 0
+                def open(self):
+                    pass
+
+                def reject(self):
+                    pass
 
             win.calibration_dialog_factory = StubDialog
             win.calibrate_requested.connect(on_cal)

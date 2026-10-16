@@ -400,12 +400,13 @@ class TestConfigWindowIntegration(UITestBase):
 
             class StubDialog(QObject):
                 camera_selected = Signal(int)
+                finished = Signal(int)
                 accepted_mapper = None
 
-                def exec(self):
+                def open(self):
                     opened.append(True)
                     self.camera_selected.emit(2)
-                    return 0
+                    self.finished.emit(0)
 
             win.calibration_dialog_factory = StubDialog
             win.show()

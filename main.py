@@ -103,7 +103,12 @@ def main(argv=None):
 
         from config_ui import ConfigWindow
 
+        from app_logging import set_error_reporter, setup_logging, show_error_dialog
+
         app = QApplication([sys.argv[0]])
+        log_path = setup_logging()
+        set_error_reporter(show_error_dialog)  # excepciones en slots -> diálogo visible + log
+        print(f"Registro de depuración: {log_path}")
         win = ConfigWindow(dry_run=dry_run)
         win.show()
         return app.exec()
