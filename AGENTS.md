@@ -16,9 +16,9 @@ Producto: app de escritorio (Windows 10/11, Python 3.10-3.13 (venv actual: 3.13.
 
 ## Reglas de trabajo
 - Terminal: PowerShell, Windows nativo (no WSL). Usar siempre .\venv\Scripts\python.exe con ruta explícita.
-- No ejecutar comandos de git; el usuario hace commits y pushes.
+- Git: el usuario autorizó (prompt de las etapas 2-4) commits locales por etapa con mensaje "feat: etapa N (resumen)"; nunca push ni comandos destructivos. Fuera de esa autorización, no ejecutar git.
 - Solo dependencias de requirements.txt. No agregar paquetes sin que se pida.
-- Trabajar solo la etapa indicada en el prompt; no adelantar funcionalidad de otras etapas.
+- Trabajar solo las etapas indicadas en el prompt vigente (hoy: Parte 0 y etapas 2-4); no adelantar funcionalidad de otras etapas.
 - Identificadores en inglés; comentarios, docstrings y textos de UI en español.
 - Si algo falla o es ambiguo: reportar el error exacto y detenerse, sin inventar workarounds.
 - Al terminar cada tarea, entregar un reporte con: archivos creados/modificados, comandos ejecutados con su salida relevante, cada condición de cierre marcada cumplida o no, y cualquier desviación del prompt.
@@ -29,11 +29,11 @@ Producto: app de escritorio (Windows 10/11, Python 3.10-3.13 (venv actual: 3.13.
 - Los textos visibles en español.
 
 ## Tokens de fuente para .qss
-Los archivos .qss deben usar los siguientes tokens (reemplazados por theme_manager.load_theme con font_scale):
--  = round(12*scale)px
--   = round(14*scale)px
--  = round(24*scale)px
-Nunca deben quedar tokens  sin reemplazar. No usar tamaños fijos; siempre usar estos tokens.
+Los archivos .qss usan estos tokens, reemplazados por theme_manager.load_theme según font_scale (en pt, mínimo 1pt; los px dejaban pointSize() = -1 y el popup del combo emitía "QFont::setPointSize: Point size <= 0"):
+- $FONT_SMALL = max(1, round(9*scale))pt
+- $FONT_BASE = max(1, round(11*scale))pt
+- $FONT_TITLE = max(1, round(18*scale))pt
+Nunca deben quedar tokens sin reemplazar. No usar tamaños de fuente fijos en px; siempre estos tokens. Las alturas mínimas clicables (48px) sí van en px.
 
 ## Módulos (responsabilidades)
 - main.py: punto de entrada; orquesta los demás módulos.
@@ -80,3 +80,5 @@ Al terminar, DETENTE y entrega el reporte. No empieces la etapa 1.
 - El control de tamaño de letra vive en el pie de la ventana (no en la tarjeta Apariencia).
 - Todo cambio de UI debe verificarse con las pruebas de layout; no afirmar verificaciones visuales no realizadas (usar 'no verificado visualmente' cuando corresponda).
 - Antes de afirmar ausencia de errores de Qt, capturar sus mensajes (qInstallMessageHandler) incluso en modo offscreen.
+- Los popups de QComboBox tienen reglas opacas propias en cada tema (`QComboBox QAbstractItemView`, ítems de 48 px); `#card QWidget` no debe volver a alcanzarlos. En la plataforma `offscreen` Qt emite siempre "QFont::setPointSizeF ... (-0.75)" al abrir un popup (artefacto, también sin hoja de estilo), así que el test del popup corre en un subproceso con la plataforma real (tests/_popup_probe.py).
+- La tarjeta Apariencia ocupa solo una celda del grid (fila 2, columna 0) con la altura de su contenido; el espacio sobrante queda vacío bajo el pie (stretch final).

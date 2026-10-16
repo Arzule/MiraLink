@@ -184,8 +184,9 @@ class ConfigWindow(QMainWindow):
         self.theme_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theme_row.addWidget(self.theme_combo, 1)
         app_layout.addLayout(theme_row)
-        app_layout.addStretch()
-        grid.addWidget(self.card_appearance, 2, 0)
+        # Una sola celda (columna izquierda de la última fila) con la altura de su contenido
+        self.card_appearance.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        grid.addWidget(self.card_appearance, 2, 0, Qt.AlignTop)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -264,6 +265,8 @@ class ConfigWindow(QMainWindow):
 
         footer_layout.addWidget(font_block, 0, Qt.AlignTop | Qt.AlignRight)
         self.scroll_layout.addWidget(footer)
+        # El espacio sobrante de la ventana queda vacío debajo del pie
+        self.scroll_layout.addStretch(1)
 
     def _create_card(self, title: str, description: str) -> QFrame:
         card = QFrame(self.content)
@@ -324,6 +327,11 @@ class ConfigWindow(QMainWindow):
         self.dwell_slider.setValue(int(inter.get("dwell_hold_ms", 1200)))
         self.blink_click_slider.setValue(int(inter.get("blink_click_ms", 250)))
         self.blink_release_slider.setValue(int(inter.get("blink_release_ms", 300)))
+        # Las señales aún no están conectadas: sincronizar las cajas numéricas con los sliders
+        self.smooth_spin.setValue(self.smooth_slider.value())
+        self.dwell_spin.setValue(self.dwell_slider.value())
+        self.blink_click_spin.setValue(self.blink_click_slider.value())
+        self.blink_release_spin.setValue(self.blink_release_slider.value())
 
         self.theme_combo.blockSignals(True)
         self.theme_combo.clear()

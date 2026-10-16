@@ -59,7 +59,8 @@ def list_themes(styles_dir=None):
 def load_theme(theme_id, font_scale, styles_dir=None):
     """Carga el tema y reemplaza los tokens de fuente.
 
-    Tokens: $FONT_SMALL = round(12*scale)px, $FONT_BASE = round(14*scale)px, $FONT_TITLE = round(24*scale)px
+    Tokens: $FONT_SMALL = round(9*scale)pt, $FONT_BASE = round(11*scale)pt, $FONT_TITLE = round(18*scale)pt
+    (en pt, con mínimo 1, para que Qt tenga siempre pointSize válido)
     Si theme_id no existe, usa "default".
     """
     if styles_dir is None:
@@ -87,9 +88,9 @@ def load_theme(theme_id, font_scale, styles_dir=None):
         with open(path_default, "r", encoding="utf-8") as f:
             qss = f.read()
 
-    font_small = f"{round(12 * scale)}px"
-    font_base = f"{round(14 * scale)}px"
-    font_title = f"{round(24 * scale)}px"
+    font_small = f"{max(1, round(9 * scale))}pt"
+    font_base = f"{max(1, round(11 * scale))}pt"
+    font_title = f"{max(1, round(18 * scale))}pt"
 
     qss = qss.replace("$FONT_SMALL", font_small)
     qss = qss.replace("$FONT_BASE", font_base)

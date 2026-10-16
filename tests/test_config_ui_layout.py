@@ -139,3 +139,73 @@ class TestConfigUILayout(unittest.TestCase):
         for m in messages:
             for token in forbidden:
                 self.assertNotIn(token, m, f"Mensaje Qt prohibido: {m}")
+
+
+class TestConfigUIPartZero(unittest.TestCase):
+    """Correcciones U1-U3 de la Parte 0."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _window(self, d):
+        win = ConfigWindow(config_path=os.path.join(d, "config.json"))
+        win.resize(1100, 1100)
+        win.show()
+        self.app.processEvents()
+        return win
+
+    def test_appearance_card_single_cell_content_height(self):
+        with tempfile.TemporaryDirectory() as d:
+            win = self._window(d)
+            card = win.card_appearance
+            grid = card.parentWidget().layout()
+            # La tarjeta está en la última fila, columna izquierda, una sola celda
+            layout = win.scroll_layout.itemAt(1).layout()
+            idx = layout.indexOf(card)
+            row, col, rowspan, colspan = layout.getItemPosition(idx)
+            self.assertEqual((row, col, rowspan, colspan), (2, 0, 1, 1))
+            self.assertEqual(card.height(), card.sizeHint().height())
+            # No se estira como las tarjetas de sliders de otra fila
+            self.assertLessEqual(card.height(), win.card_smooth.height())
+            # El sobrante queda debajo del pie, no entre tarjetas ni arriba
+            footer_bottom = win.btn_save.mapTo(win.content, win.btn_save.rect().bottomLeft()).y()
+            self.assertLessEqual(footer_bottom, win.content.height())
+            win.close()
+
+    def test_spinboxes_synced_with_sliders_on_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            win = self._window(d)
+            self.assertEqual(win.smooth_spin.value(), win.smooth_slider.value())
+            self.assertEqual(win.dwell_spin.value(), win.dwell_slider.value())
+            self.assertEqual(win.blink_click_spin.value(), win.blink_click_slider.value())
+            self.assertEqual(win.blink_release_spin.value(), win.blink_release_slider.value())
+            win.close()
+
+    def test_combo_popup_all_themes_real_platform(self):
+        """Abre el popup por tema y escala en un subproceso con la plataforma Qt real.
+
+        En la plataforma 'offscreen' Qt emite siempre 'QFont::setPointSizeF: Point size <= 0
+        (-0.75)' al abrir cualquier popup (incluso sin hoja de estilo), por eso este chequeo
+        corre con la plataforma real de Windows.
+        """
+        import json
+        import subprocess
+        import sys
+
+        probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_popup_probe.py")
+        env = dict(os.environ)
+        env.pop("QT_QPA_PLATFORM", None)
+        with tempfile.TemporaryDirectory() as d:
+            proc = subprocess.run([sys.executable, probe, d], capture_output=True, text=True, env=env, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertEqual(data["qfont"], [], f"Mensajes QFont:: {data['qfont']}")
+            self.assertEqual(len(data["results"]), 18)
+            for r in data["results"]:
+                self.assertLessEqual(
+                    abs(r["lum"] - r["declared"]),
+                    0.1,
+                    f"Fondo del popup distinto del declarado: {r}",
+                )
+                self.assertGreaterEqual(r["view_h"], 3 * 48 - 10)  # ítems de al menos 48 px
