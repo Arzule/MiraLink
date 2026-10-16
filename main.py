@@ -90,8 +90,46 @@ def check_environment():
     return 1
 
 
+def run_record_session(dialog_factory=None, record_dir=None):
+    """`--record-session`: calibración de 9 puntos + validación con 5 puntos nuevos, grabando cada cuadro.
+
+    Cada intento (completado o cancelado) se guarda en sessions/session_<fecha>.npz. "Aceptar" también
+    guarda calibration.json, como en la calibración normal.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from app_logging import set_error_reporter, setup_logging, show_error_dialog
+    from config_manager import load_config
+    from gaze_session import default_sessions_dir
+
+    app = QApplication.instance() or QApplication([sys.argv[0]])
+    app.setQuitOnLastWindowClosed(False)  # el modal se oculta mientras se muestra la pantalla completa
+    log_path = setup_logging()
+    set_error_reporter(show_error_dialog)
+    print(f"Registro de depuración: {log_path}")
+    record_dir = record_dir or default_sessions_dir()
+    if dialog_factory is None:
+        from calibration_ui import CalibrationDialog
+
+        dialog_factory = CalibrationDialog
+    dialog = dialog_factory(load_config(), record_dir=record_dir)
+    dialog.finished.connect(app.quit)
+    dialog.show()
+    app.exec()
+    saved = list(getattr(dialog, "saved_sessions", []))
+    if saved:
+        for path in saved:
+            print(f"Sesión guardada: {path}")
+        print("Evalúala con: .\\venv\\Scripts\\python.exe scripts\\replay_session.py " + saved[-1])
+    else:
+        print("No se grabó ninguna sesión.")
+    return 0
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if "--record-session" in args:
+        return run_record_session()
     if "--tracker-debug" in args:
         from config_manager import load_config
         from eye_tracker import run_tracker_debug

@@ -78,6 +78,7 @@ class TrackingFrame:
     face_center: Optional[Tuple[float, float]] = None  # normalizado (0..1) en el cuadro
     interocular: float = 0.0  # fracción del ancho del cuadro
     landmarks: Optional[np.ndarray] = None  # (478, 2) normalizados, para dibujar
+    matrix: Optional[np.ndarray] = None  # matriz de transformación facial 4x4 (se graba en --record-session)
     blink_score: Optional[float] = None  # promedio eyeBlinkLeft/Right si el modelo lo entrega (informativo)
     eyes_closed: bool = False  # estado del BlinkDetector
     blink_event: Optional[BlinkEvent] = None  # parpadeo que terminó en este cuadro
@@ -173,6 +174,7 @@ def build_tracking_frame(
         face_center=(float(lm[:, 0].mean()), float(lm[:, 1].mean())),
         interocular=float(feats[6]),
         landmarks=lm[:, :2].copy(),
+        matrix=None if matrix is None else np.asarray(matrix, dtype=float),
         blink_score=blink_score,
     )
 

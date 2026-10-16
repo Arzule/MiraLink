@@ -180,6 +180,32 @@ class TestCalibrationDialog(UITestBase):
         dlg.preview.grab().save(os.path.join(self.shots, "preview_hint.png"))
         dlg.close()
 
+    def test_deferred_tracker_start_after_close_does_not_reopen_camera(self):
+        # showEvent programa el arranque con singleShot(0); cerrar antes de que se dispare no debe abrir la cámara
+        import sys
+
+        from PySide6.QtCore import QEvent
+
+        errors = []
+        old_hook = sys.excepthook
+        sys.excepthook = lambda *exc: errors.append(exc[1])
+        try:
+            dlg = self.make_dialog()
+            dlg.show()
+            dlg.reject()
+            self.pump()
+            self.assertEqual(self.trackers, [])
+            dlg2 = self.make_dialog()
+            dlg2.show()
+            dlg2.deleteLater()  # destruido antes del arranque diferido
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            del dlg2
+            self.pump()
+            self.assertEqual(self.trackers, [])
+        finally:
+            sys.excepthook = old_hook
+        self.assertEqual(errors, [])
+
     def test_tracker_failure_shows_message(self):
         dlg = self.make_dialog()
         dlg.show()
@@ -415,6 +441,139 @@ class TestConfigWindowIntegration(UITestBase):
             self.assertEqual(opened, [True])
             self.assertEqual(win._config["camera"]["device_index"], 2)
             win.close()
+
+
+class TestRecordSession(UITestBase):
+    """--record-session: 9 puntos + 5 de validación, cada cuadro grabado en sessions/."""
+
+    make_dialog = TestCalibrationDialog.make_dialog
+
+    def run_until_closed(self, dlg, clock, rng, max_frames=3000):
+        tr = self.trackers[0]
+        geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
+        t, n = 0.0, 0
+        while dlg.calib_screen is not None and n < max_frames:
+            scr = dlg.calib_screen
+            px, py = scr.session.current_point
+            tgt = np.array([[px / geom["width"] * 1920, py / geom["height"] * 1080]])
+            clock.t = 100.0 + t
+            tr.frame_ready.emit(make_frame(t, synth_features(tgt, rng)[0]))
+            t += 1 / 30
+            n += 1
+        return n
+
+    def test_completed_run_is_saved_with_both_stages(self):
+        from gaze_session import load_session
+
+        with tempfile.TemporaryDirectory() as d:
+            clock = FakeClock()
+            dlg = self.make_dialog(calibration_path=os.path.join(d, "calibration.json"), clock=clock,
+                                   result_dialog_exec=lambda _d: True, record_dir=os.path.join(d, "sessions"))
+            dlg.show()
+            self.pump()
+            dlg.start_calibration()
+            self.assertEqual(len(dlg.calib_screen.session.validation), 5)
+            frames = self.run_until_closed(dlg, clock, np.random.default_rng(8))
+            self.assertIsNone(dlg.calib_screen)
+            self.assertEqual(len(dlg.saved_sessions), 1)
+            sess = load_session(dlg.saved_sessions[0])
+            self.assertEqual(len(sess), frames)
+            self.assertEqual(sess.meta["outcome"], "completed")
+            geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
+            self.assertEqual(sess.meta["screen"], geom)
+            self.assertEqual(len(sess.meta["validation_points"]), 5)
+            self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(9)))
+            self.assertEqual(set(sess.point[sess.capture_mask("validation")].tolist()), set(range(5)))
+            self.assertTrue(os.path.isfile(os.path.join(d, "calibration.json")))  # Aceptar también calibra
+
+    def test_cancelled_run_is_saved_too(self):
+        from gaze_session import load_session
+
+        with tempfile.TemporaryDirectory() as d:
+            clock = FakeClock()
+            dlg = self.make_dialog(clock=clock, record_dir=d)
+            dlg.show()
+            self.pump()
+            dlg.start_calibration()
+            tr = self.trackers[0]
+            for i in range(10):
+                tr.frame_ready.emit(make_frame(i / 30, np.zeros(9)))
+            QTest.keyPress(dlg.calib_screen, Qt.Key_Escape)
+            clock.t += 2.0
+            dlg.calib_screen.tick()
+            self.assertIsNone(dlg.calib_screen)
+            self.assertIn("Sesión guardada en", dlg.status_label.text())
+            sess = load_session(dlg.saved_sessions[0])
+            self.assertEqual(sess.meta["outcome"], "aborted")
+            self.assertEqual(len(sess), 10)
+            dlg.close()
+
+    def test_normal_calibration_does_not_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            dlg = self.make_dialog(calibration_path=os.path.join(d, "c.json"))
+            dlg.show()
+            self.pump()
+            dlg.start_calibration()
+            self.assertIsNone(dlg.calib_screen.recorder)
+            dlg.reject()
+            self.assertEqual(dlg.saved_sessions, [])
+
+    def test_validation_layout_keeps_points_clear(self):
+        for w, h in ((1280, 720), (1920, 1080), (1366, 768), (2560, 1440)):
+            session = CalibrationSession(w, h, validation=cui.validation_points(w, h))
+            session.stage = "validation"
+            scr = cui.CalibrationScreen(session, dpr=1.0, clock=FakeClock())
+            scr.resize(w, h)
+            regions = scr.layout_regions()
+            sc = max(0.6, h / 1080.0)
+            for k in range(5):
+                c = scr.logical_validation_point(k)
+                keep_out = QRectF(c.x() - 220 * sc, c.y() - 60 * sc, 440 * sc, 120 * sc)
+                for name, r in regions.items():
+                    self.assertFalse(r.intersects(keep_out), f"{name} tapa la validación {k + 1} ({w}x{h})")
+            names = list(regions)
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    self.assertFalse(regions[names[i]].intersects(regions[names[j]]))
+            scr.show()
+            self.pump()
+            scr._sync_layout()
+            self.assertEqual(scr.mini.geometry().topLeft().y(), int(regions["mini"].y()))
+            if (w, h) == (1920, 1080):
+                scr.grab().save(os.path.join(self.shots, "screen_validation.png"))
+            scr.close()
+
+
+class TestRecordSessionEntryPoint(UITestBase):
+    def test_main_record_session_saves_and_prints_paths(self):
+        from unittest import mock
+
+        import main
+
+        created = {}
+
+        class StubDialog(QDialog):
+            def __init__(self, config, record_dir=None):
+                super().__init__()
+                created["record_dir"] = record_dir
+                self.saved_sessions = [os.path.join(record_dir, "session_x.npz")]
+
+            def show(self):
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(0, lambda: self.done(0))
+
+        out = __import__("io").StringIO()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("app_logging.setup_logging", return_value="log"), \
+                mock.patch("app_logging.set_error_reporter"), \
+                __import__("contextlib").redirect_stdout(out):
+            code = main.run_record_session(dialog_factory=StubDialog, record_dir=d)
+        self.app.setQuitOnLastWindowClosed(True)
+        self.assertEqual(code, 0)
+        self.assertEqual(created["record_dir"], d)
+        self.assertIn("Sesión guardada:", out.getvalue())
+        self.assertIn("replay_session.py", out.getvalue())
 
 
 if __name__ == "__main__":
