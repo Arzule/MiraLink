@@ -91,6 +91,11 @@ def check_environment():
 
 
 def main():
+    if "--tracker-debug" in sys.argv[1:]:
+        from config_manager import load_config
+        from eye_tracker import run_tracker_debug
+
+        return run_tracker_debug(load_config()["camera"]["device_index"])
     if len(sys.argv) > 1 and sys.argv[1] == "--config":
         from PySide6.QtWidgets import QApplication
         from config_ui import ConfigWindow
