@@ -33,12 +33,24 @@ from calibration import (
     PHASE_SETTLING,
     STAGE_VALIDATION,
     CalibrationSession,
+    GazeEarModel,
     GazeMapper,
     filter_point_samples,
+    iris_height,
+    local_open_mask,
     validation_points,
 )
 from config_manager import DEFAULT_CONFIG
-from eye_tracker import FEATURE_DIM, FEATURE_NAMES, NUM_LANDMARKS, BlinkEvent, TrackingFrame
+from eye_tracker import (
+    EYE_BLENDSHAPES,
+    FEATURE_DIM,
+    FEATURE_NAMES,
+    NUM_LANDMARKS,
+    BlinkDetector,
+    BlinkEvent,
+    TrackingFrame,
+    gaze_perp,
+)
 
 SESSION_VERSION = 1
 SESSIONS_DIRNAME = "sessions"
@@ -102,6 +114,7 @@ class SessionRecorder:
         self._landmarks: List[Optional[np.ndarray]] = []
         self._matrix: List[Optional[np.ndarray]] = []
         self._fps: List[float] = []
+        self._blendshapes: List[Optional[np.ndarray]] = []
         self._camera_info = ""
         self._image_size: Optional[Tuple[int, int]] = None
 
@@ -129,6 +142,8 @@ class SessionRecorder:
         mx = getattr(frame, "matrix", None)
         self._matrix.append(None if mx is None else np.asarray(mx, dtype=np.float32))
         self._fps.append(float(getattr(frame, "fps", 0.0) or 0.0))
+        shapes = getattr(frame, "eye_blendshapes", None)
+        self._blendshapes.append(None if shapes is None else np.asarray(shapes, dtype=np.float32))
         self._camera_info = getattr(frame, "camera_info", "") or self._camera_info
         image = getattr(frame, "image", None)
         if image is not None:
@@ -169,6 +184,11 @@ class SessionRecorder:
             if m is not None and m.shape[0] >= 4 and m.shape[1] >= 4:
                 matrix[i] = m[:4, :4]
         out["matrix"] = matrix
+        shapes = np.full((n, len(EYE_BLENDSHAPES)), np.nan, dtype=np.float32)
+        for i, b in enumerate(self._blendshapes):
+            if b is not None and b.shape == (len(EYE_BLENDSHAPES),):
+                shapes[i] = b
+        out["blendshapes"] = shapes  # columnas = eye_tracker.EYE_BLENDSHAPES (meta["blendshape_names"])
         if self.keep_landmarks:
             lms = np.full((n, NUM_LANDMARKS, 2), np.nan, dtype=np.float32)
             for i, lm in enumerate(self._landmarks):
@@ -191,7 +211,7 @@ class SessionRecorder:
             path = os.path.join(directory, f"session_{stamp}_{k}.npz")
             k += 1
         arrays = self.arrays()
-        meta = dict(self.meta, n_frames=len(self), camera=self.camera_meta())
+        meta = dict(self.meta, n_frames=len(self), camera=self.camera_meta(), blendshape_names=list(EYE_BLENDSHAPES))
         tmp = path + ".tmp.npz"
         np.savez_compressed(tmp, meta=np.array(json.dumps(meta, ensure_ascii=False)), **arrays)
         os.replace(tmp, path)
@@ -217,6 +237,7 @@ class RecordedSession:
     ear: Optional[np.ndarray] = None
     landmarks: Optional[np.ndarray] = None
     matrix: Optional[np.ndarray] = None
+    blendshapes: Optional[np.ndarray] = None  # (n, len(EYE_BLENDSHAPES)); no existe en sesiones anteriores
 
     @classmethod
     def from_arrays(cls, arrays: Dict[str, np.ndarray], meta: dict) -> "RecordedSession":
@@ -234,6 +255,7 @@ class RecordedSession:
             ear=arrays.get("ear"),
             landmarks=arrays.get("landmarks"),
             matrix=arrays.get("matrix"),
+            blendshapes=arrays.get("blendshapes"),
         )
 
     def __len__(self) -> int:
@@ -522,14 +544,122 @@ class Variant:
 
 
 def robust_samples(session: "RecordedSession", stage: str = "calibration"):
-    """Muestras de captura con el filtrado robusto de la calibración (por punto)."""
-    m = session.capture_mask(stage) & ~post_blink_mask(session.t, session.closed)
-    x, y, g = session.features[m], session.target[m], session.point[m].astype(int)
+    """Muestras de captura con el filtrado robusto de la calibración (por punto).
+
+    Como la aplicación: con EAR grabado, los ojos cerrados se deciden con el EAR del propio punto
+    (local_open_mask); sin él, con los cierres del BlinkDetector grabados y los 150 ms siguientes.
+    """
+    has_ear = session.ear is not None
+    m = session.capture_mask(stage)
+    if not has_ear:
+        m &= ~post_blink_mask(session.t, session.closed)
+    x, y, g, t = session.features[m], session.target[m], session.point[m].astype(int), session.t[m]
+    ear = session.ear[m] if has_ear else None
     keep = np.zeros(len(x), dtype=bool)
     for p in np.unique(g):
         idx = np.flatnonzero(g == p)
-        keep[idx] = filter_point_samples(x[idx])
+        k = local_open_mask(t[idx], ear[idx]) if has_ear else np.ones(len(idx), dtype=bool)
+        if k.any():
+            k[k] = filter_point_samples(x[idx][k])
+        keep[idx] = k
     return x[keep], y[keep], g[keep]
+
+
+def ear_points(session: "RecordedSession") -> Optional[np.ndarray]:
+    """[altura del iris, EAR] medianos por punto (calibración y validación), como CalibrationSession."""
+    if session.ear is None:
+        return None
+    rows = []
+    for stage in ("calibration", "validation"):
+        m = session.capture_mask(stage)
+        t, x, ear, g = session.t[m], session.features[m], session.ear[m], session.point[m]
+        for p in np.unique(g):
+            idx = np.flatnonzero(g == p)
+            k = local_open_mask(t[idx], ear[idx])
+            if k.any():
+                k[k] = filter_point_samples(x[idx][k])
+            if k.sum() >= 3:
+                rows.append((float(np.median(iris_height(x[idx][k]))), float(np.median(ear[idx][k]))))
+    return np.asarray(rows, dtype=float) if rows else None
+
+
+def blink_report(session: "RecordedSession", click_range_ms: Tuple[float, float] = (150.0, 2000.0)) -> Dict[str, object]:
+    """Cierres por fila de la pantalla (arriba / medio / abajo) con el detector sin y con GazeEarModel.
+
+    "grabado" son los cierres que marcó la aplicación al grabar. Con blendshapes grabados se añaden sus
+    medianas por fila con los ojos abiertos y en los cierres detectados (para decidir si sirven).
+    """
+    if session.ear is None:
+        raise ValueError("La sesión no tiene EAR grabado")
+    row = np.digitize(session.target[:, 1] / max(session.height, 1), [0.35, 0.65])
+    face = session.face.astype(bool)
+    model = GazeEarModel.fit(ear_points(session))
+    out: Dict[str, object] = {"model": model, "rows": ("arriba", "medio", "abajo")}
+
+    def by_row(closed):
+        return [float(closed[face & (row == r)].mean() * 100) if (face & (row == r)).any() else None for r in range(3)]
+
+    out["recorded"] = {"closed_pct": by_row(session.closed.astype(bool) & face)}
+    variants = [("sin modelo", None)] + ([("con modelo", model)] if model is not None else [])
+    for label, gm in variants:
+        det = BlinkDetector(gaze_model=gm)
+        closed = np.zeros(len(session), dtype=bool)
+        events = []
+        for i in range(len(session)):
+            ev = det.update(float(session.t[i]), float(session.ear[i]), bool(face[i]), gaze_perp(session.features[i]))
+            closed[i] = det.is_closed
+            if ev is not None:
+                events.append(ev)
+        lo, hi = click_range_ms
+        clicks = [e for e in events if lo <= e.duration_ms <= hi]
+        out[label] = {
+            "closed_pct": by_row(closed),
+            "events": len(events),
+            "click_range": len(clicks),
+            "suspect": sum(1 for e in clicks if e.gaze_suspect),
+            "closed_mask": closed,
+        }
+    shapes = session.blendshapes
+    if shapes is not None and np.isfinite(shapes).any():
+        names = list(session.meta.get("blendshape_names") or EYE_BLENDSHAPES)
+        blink = shapes[:, [names.index("eyeBlinkLeft"), names.index("eyeBlinkRight")]].mean(axis=1)
+        down = shapes[:, [names.index("eyeLookDownLeft"), names.index("eyeLookDownRight")]].mean(axis=1)
+        closed = out[variants[-1][0]]["closed_mask"]
+        table = {}
+        for r in range(3):
+            for state, mask in (("abiertos", face & (row == r) & ~closed), ("cerrados", face & (row == r) & closed)):
+                if mask.sum() >= 3:
+                    table[(r, state)] = (float(np.nanmedian(blink[mask])), float(np.nanmedian(down[mask])), int(mask.sum()))
+        out["blendshapes"] = table
+    return out
+
+
+def format_blink_report(rep: Dict[str, object]) -> str:
+    def pct(values):
+        return " / ".join("-" if v is None else f"{v:.0f} %" for v in values)
+
+    lines = ["Parpadeos: cuadros con ojos 'cerrados' por fila (arriba / medio / abajo)"]
+    lines.append(f"  grabado por la aplicación: {pct(rep['recorded']['closed_pct'])}")
+    for label in ("sin modelo", "con modelo"):
+        if label in rep:
+            r = rep[label]
+            lines.append(f"  detector {label}: {pct(r['closed_pct'])}; {r['events']} parpadeos, {r['click_range']} en el "
+                         f"rango de clic" + (f" ({r['suspect']} bloqueados por el seguro)" if label == "con modelo" else ""))
+    model = rep.get("model")
+    if model is not None:
+        lines.append(f"  modelo EAR-mirada: EAR = {model.c0:.3f} {model.c1:+.3f} x altura del iris; en la fila más baja el"
+                     f" ojo se abre un {model.factor(model.low_end) * 100:.0f} % de lo normal; seguro de clic "
+                     + ("activo" if model.guard_active else "inactivo"))
+    else:
+        lines.append("  sin modelo EAR-mirada (faltan puntos completos)")
+    table = rep.get("blendshapes")
+    if table:
+        lines.append("  blendshapes (medianas eyeBlink / eyeLookDown, cuadros):")
+        for (r, state), (b, d, n) in sorted(table.items()):
+            lines.append(f"    {rep['rows'][r]:6s} ojos {state}: {b:.2f} / {d:.2f} ({n})")
+    elif "blendshapes" not in rep:
+        lines.append("  (la sesión no tiene blendshapes: se graban desde esta versión)")
+    return "\n".join(lines)
 
 
 class _NullMouse:
@@ -724,6 +854,7 @@ def posture_report(session: "RecordedSession") -> Dict[str, object]:
         out["validation_corrected_px"] = mapper.metrics.get("validation_corrected_px")
         out["auto_offset"] = mapper.metrics.get("auto_offset")
         out["auto_offset_rejected"] = bool(mapper.metrics.get("auto_offset_rejected"))
+        out["auto_offset_skipped"] = bool(mapper.metrics.get("auto_offset_skipped"))
     else:
         mapper.fit(x, y, g)
     # cuánto se movió la cabeza en la validación respecto a la calibración (la sesión no tiene fase de uso)
@@ -755,7 +886,12 @@ def format_posture_report(rep: Dict[str, object]) -> str:
             off = rep.get("auto_offset") or [0, 0]
             line += (f", {rep['validation_corrected_px']:.0f} px con la corrección automática (dejando un punto fuera;"
                      f" offset {off[0]:+.0f}, {off[1]:+.0f} px")
-            line += ", RECHAZADO por grande)" if rep.get("auto_offset_rejected") else ")"
+            if rep.get("auto_offset_rejected"):
+                line += ", RECHAZADO por grande)"
+            elif rep.get("auto_offset_skipped"):
+                line += ", NO SE APLICA: no mejora el error sin corregir)"
+            else:
+                line += ")"
         lines.append(line)
     if "pose_max_deviation" in rep:
         warned = rep["drift_warning_after_s"]

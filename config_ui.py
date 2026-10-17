@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config_manager import load_config, save_config
+from config_manager import camera_size, load_config, save_config
 from theme_manager import list_themes, load_theme
 
 logger = logging.getLogger(__name__)
@@ -453,10 +453,7 @@ class ConfigWindow(QMainWindow):
             config_getter=lambda: self._config.get("interaction", {}),
             dry_run=self.dry_run,
             camera_index_getter=lambda: int(self._config.get("camera", {}).get("device_index", 0)),
-            camera_size_getter=lambda: (
-                int(self._config.get("camera", {}).get("width", 640)),
-                int(self._config.get("camera", {}).get("height", 480)),
-            ),
+            camera_size_getter=lambda: camera_size(self._config),
         )
 
     def _on_control_clicked(self):
@@ -473,6 +470,8 @@ class ConfigWindow(QMainWindow):
             session.recentered.connect(self.control_label.setText)
         if hasattr(session, "pose_warning"):
             session.pose_warning.connect(self._on_pose_warning)
+        if hasattr(session, "camera_status"):
+            session.camera_status.connect(self._on_camera_status)
         ok, message = session.start()
         if not ok:
             self.control_label.setText(message)
@@ -500,9 +499,19 @@ class ConfigWindow(QMainWindow):
         elif self.control_session is not None:
             self._on_paused_changed(bool(getattr(self.control_session, "paused", False)))
 
+    def _on_camera_status(self, text: str):
+        """Resolución y fps reales de la cámara: se añaden al texto de estado del control."""
+        self._camera_status = text
+        session = self.control_session
+        if session is not None and not getattr(session, "_pose_warning_shown", False):
+            self._on_paused_changed(bool(getattr(session, "paused", False)))
+
     def _on_paused_changed(self, paused: bool):
         self.btn_control.setText("Iniciar Control del Cursor" if paused else "Pausar Control del Cursor")
         suffix = " (modo simulación: no se mueve el cursor real)" if self.dry_run else ""
+        camera = getattr(self, "_camera_status", "")
+        if camera:
+            suffix += f" {camera}."
         if paused:
             self.control_label.setText(f"Control pausado. Ctrl+Alt+P o el botón lo reanudan.{suffix}")
         else:
@@ -516,6 +525,7 @@ class ConfigWindow(QMainWindow):
         self.control_session = None
 
     def _stop_control(self):
+        self._camera_status = ""
         session, self.control_session = self.control_session, None
         if session is not None:
             session.stop()

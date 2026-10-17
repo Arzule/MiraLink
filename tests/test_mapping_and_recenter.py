@@ -165,7 +165,10 @@ class TestValidationMetrics(unittest.TestCase):
         mapper = cal.fit_session(s)
         self.assertEqual((mapper.feature_set, mapper.model, mapper.aggregate), (
             DEFAULT_FIT["feature_set"], DEFAULT_FIT["model"], DEFAULT_FIT["aggregate"]))
-        self.assertEqual(mapper.error_source, "validation_corrected")  # DEFAULT_FIT corrige el sesgo común
+        # Sin sesgo común la corrección automática no mejora el error: no se aplica
+        self.assertEqual(mapper.error_source, "validation")
+        self.assertTrue(mapper.metrics["auto_offset_skipped"])
+        np.testing.assert_allclose(mapper.offset, [0.0, 0.0])
         self.assertIn("discarded_samples", mapper.metrics)
         self.assertLess(mapper.estimated_error_px, 100)
 

@@ -131,11 +131,14 @@ class TestCameraSource(unittest.TestCase):
         self.assertNotIn(FakeCv2.CAP_PROP_FOURCC, cv2.captures[1].props)  # 640x480 sin MJPG
         self.assertIn("sin 1280x720", cam.describe())
 
-    def test_falls_back_when_size_not_delivered(self):
-        cam, _ = self.make({(640, 480, False): 30.0}, (1280, 720))
+    def test_accepts_delivered_size_when_fps_are_enough(self):
+        # La cámara no da 1280x720 y entrega otro tamaño a 30 fps: se acepta (antes se descartaba sin medir)
+        cam, cv2 = self.make({(640, 480, False): 30.0}, (1280, 720))
         cam.open()
         self.assertEqual(cam.actual_size, (640, 480))
-        self.assertIn("entrega 640x480", cam.fallback_reason)
+        self.assertEqual(cam.fallback_reason, "")
+        self.assertEqual(len(cv2.captures), 1)
+        self.assertIn("pedido 1280x720", cam.describe())
 
     def test_errors_are_clear(self):
         cam, _ = self.make({(640, 480, False): 30.0}, opens=False)
@@ -196,7 +199,9 @@ class TestFpsMeter(unittest.TestCase):
 
 class TestCameraConfig(unittest.TestCase):
     def test_defaults_and_clamps(self):
-        self.assertEqual(DEFAULT_CONFIG["camera"], {"device_index": 0, "width": 640, "height": 480})
+        self.assertEqual(
+            DEFAULT_CONFIG["camera"], {"device_index": 0, "resolution": "native", "width": 640, "height": 480}
+        )
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "config.json")
             with open(path, "w", encoding="utf-8") as f:
@@ -270,8 +275,10 @@ class TestCameraStatusInUi(unittest.TestCase):
         self.assertIn("Menos de 25 fps", dlg.camera_info_label.text())
         self.assertTrue(dlg.camera_info_label.accessibleName())
         dlg.reject()
-        self.assertEqual(cui.camera_size_from_config({"camera": {"width": 1280, "height": 720}}), (1280, 720))
-        self.assertEqual(cui.camera_size_from_config({}), (640, 480))
+        fixed = {"camera": {"resolution": "fixed", "width": 1280, "height": 720}}
+        self.assertEqual(cui.camera_size_from_config(fixed), (1280, 720))
+        self.assertIsNone(cui.camera_size_from_config({"camera": {"width": 1280, "height": 720}}))  # nativa
+        self.assertIsNone(cui.camera_size_from_config({}))
 
     def test_recorder_keeps_camera_meta(self):
         import gaze_session as gs

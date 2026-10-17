@@ -37,7 +37,7 @@ DEFAULT_FIT = {
     "model": "quad_reduced",
     "alpha": "cv",
     "aggregate": "samples",
-    "auto_offset": True,  # corrige el sesgo común con los 5 puntos de validación (3 sesiones reales: 135 -> 101 px)
+    "auto_offset": True,  # corrige el sesgo común con los 5 puntos de validación si mejora el error (LOO)
 }
 
 # Pose de la cabeza vigilada para el aviso de deriva: nose_x, nose_y, yaw, pitch (índices de FEATURE_NAMES)
@@ -167,6 +167,118 @@ def filter_point_samples(
     return keep
 
 
+BLINK_CLOSE_RATIO = 0.6  # como BlinkDetector: cerrado si EAR < 0.6 x apertura de referencia
+
+
+def iris_height(x: np.ndarray) -> np.ndarray:
+    """Altura del iris en el ojo por muestra (media de los dos iris_perp; positivo = abajo)."""
+    x = np.atleast_2d(np.asarray(x, dtype=float))
+    return (x[:, 1] + x[:, 3]) / 2.0
+
+
+def local_open_mask(
+    t: np.ndarray, ear: np.ndarray, close_ratio: float = BLINK_CLOSE_RATIO, post_blink_s: float = 0.15
+) -> np.ndarray:
+    """Muestras de UN punto con los ojos abiertos según el propio punto.
+
+    La referencia es el percentil 90 del EAR del punto (mirando a esa altura): al mirar abajo el párpado
+    baja y el BlinkDetector global lo tomaba por un cierre (sesiones reales del 16/10: hasta el 75 % de
+    la fila inferior descartada y 5 calibraciones abortadas). Se descartan EAR < close_ratio x referencia
+    y los `post_blink_s` siguientes. Sin EAR (NaN) no se descarta nada.
+    """
+    t = np.asarray(t, dtype=float)
+    ear = np.asarray(ear, dtype=float)
+    finite = np.isfinite(ear)
+    if finite.sum() < 3:
+        return np.ones(len(ear), dtype=bool)
+    ref = float(np.percentile(ear[finite], 90))
+    closed = finite & (ear < close_ratio * ref)
+    keep = ~closed
+    closed_t = np.sort(t[closed])
+    if len(closed_t):
+        idx = np.searchsorted(closed_t, t, side="right") - 1  # último cierre en o antes de cada muestra
+        recent = idx >= 0
+        keep[recent] &= t[recent] - closed_t[idx[recent]] >= post_blink_s
+    return keep
+
+
+@dataclass
+class GazeEarModel:
+    """Apertura del ojo (EAR) esperada según la altura del iris, medida en la calibración.
+
+    EAR = c0 + c1 * altura, ajustado con la mediana de cada punto (calibración + validación). En las
+    sesiones reales la correlación fue de -0.8 a -0.97 (mirar abajo cierra el párpado): con el primer
+    monitor el EAR bajaba un 14 % de arriba abajo; con el del 16/10, a la mitad. La altura se recorta al
+    rango calibrado (fuera de él no se extrapola) y el factor relativo a la altura de referencia (la
+    mediana de los puntos) se limita a [MIN_FACTOR, MAX_FACTOR]. Lo usa BlinkDetector(gaze_model=...).
+    """
+
+    c0: float
+    c1: float
+    perp_min: float
+    perp_max: float
+    perp_ref: float
+
+    MIN_FACTOR = 0.35
+    MAX_FACTOR = 1.25
+    GUARD_FACTOR = 0.8  # si en la fila más baja el EAR esperado cae más de un 20 %, se activa el seguro de clic
+
+    def expected(self, perp: float) -> float:
+        return self.c0 + self.c1 * float(np.clip(perp, self.perp_min, self.perp_max))
+
+    def factor(self, perp: float) -> float:
+        """Apertura esperada a esta altura / apertura a la altura de referencia."""
+        ref = self.expected(self.perp_ref)
+        if ref <= 1e-6:
+            return 1.0
+        return float(np.clip(self.expected(perp) / ref, self.MIN_FACTOR, self.MAX_FACTOR))
+
+    @property
+    def low_end(self) -> float:
+        """Extremo del rango calibrado donde el ojo está más cerrado (la fila de abajo, normalmente)."""
+        return self.perp_max if self.c1 < 0 else self.perp_min
+
+    def beyond_low_end(self, perp: float) -> bool:
+        """La mirada va más allá de la fila más cerrada calibrada (p. ej. la barra de tareas)."""
+        return bool(self.c1 * (float(perp) - self.low_end) < 0)
+
+    @property
+    def guard_active(self) -> bool:
+        return self.factor(self.low_end) < self.GUARD_FACTOR
+
+    @classmethod
+    def fit(cls, points: Optional[np.ndarray]) -> Optional["GazeEarModel"]:
+        """`points` (k, 2): [altura del iris, EAR] por punto. None si no hay datos suficientes."""
+        if points is None:
+            return None
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            return None
+        pts = pts[np.isfinite(pts).all(axis=1)]
+        if len(pts) < 3 or np.ptp(pts[:, 0]) < 1e-3:
+            return None
+        c1, c0 = np.polyfit(pts[:, 0], pts[:, 1], 1)
+        model = cls(float(c0), float(c1), float(pts[:, 0].min()), float(pts[:, 0].max()), float(np.median(pts[:, 0])))
+        if min(model.expected(model.perp_min), model.expected(model.perp_max)) <= 0.02:
+            return None  # ajuste sin sentido físico
+        return model
+
+    def to_dict(self) -> dict:
+        return {k: float(getattr(self, k)) for k in ("c0", "c1", "perp_min", "perp_max", "perp_ref")}
+
+    @classmethod
+    def from_dict(cls, data) -> Optional["GazeEarModel"]:
+        """Opcional en calibration.json: si falta o es inválido se devuelve None (detector sin modelo)."""
+        try:
+            model = cls(**{k: float(data[k]) for k in ("c0", "c1", "perp_min", "perp_max", "perp_ref")})
+        except (KeyError, TypeError, ValueError):
+            return None
+        values = model.to_dict().values()
+        if not all(np.isfinite(v) for v in values) or model.perp_min > model.perp_max:
+            return None
+        return model
+
+
 class GazeMapper:
     """Regresión ridge sobre rasgos normalizados (solo numpy).
 
@@ -205,6 +317,7 @@ class GazeMapper:
         self.clamp = clamp
         self.auto_offset = auto_offset  # corrige el sesgo común con los puntos de validación
         self.pose_ref: Optional[np.ndarray] = None  # pose media de la calibración (POSE_COLS)
+        self.blink_model: Optional[GazeEarModel] = None  # EAR esperado según la altura de la mirada
         self.mean: Optional[np.ndarray] = None
         self.scale: Optional[np.ndarray] = None
         self.weights: Optional[np.ndarray] = None  # (m, 2)
@@ -337,7 +450,9 @@ class GazeMapper:
 
         offset = -media de los errores por punto. El error que se informa es honesto: cada punto se
         evalúa con el offset calculado con los OTROS puntos (dejando uno fuera). Necesita >= 3 puntos y
-        se rechaza si el offset supera MAX_RECENTER_FRACTION del área calibrada (algo falló).
+        se rechaza si el offset supera MAX_RECENTER_FRACTION del área calibrada (algo falló). Solo se
+        aplica si ese error corregido es menor que el error sin corregir: con poco sesgo común el offset
+        solo añade ruido (sesión real 223221: 116 -> 129 px); entonces queda "auto_offset_skipped".
         """
         errs = self._validation_errors(val_x, val_y, val_groups)
         if len(errs) < 3:
@@ -348,6 +463,9 @@ class GazeMapper:
         out = {"validation_corrected_px": float(np.mean(loo)), "auto_offset": [float(offset[0]), float(offset[1])]}
         if (np.abs(offset) > MAX_RECENTER_FRACTION * np.maximum(span, 1.0)).any():
             out["auto_offset_rejected"] = True
+            return out
+        if np.mean(loo) >= np.mean(np.linalg.norm(errs, axis=1)):
+            out["auto_offset_skipped"] = True
             return out
         self.offset = offset
         # el offset corrige la pose de la validación: el aviso de deriva se mide desde esa pose
@@ -369,7 +487,8 @@ class GazeMapper:
 
     @property
     def offset_from_validation(self) -> bool:
-        return "validation_corrected_px" in self.metrics and not self.metrics.get("auto_offset_rejected")
+        m = self.metrics
+        return "validation_corrected_px" in m and not m.get("auto_offset_rejected") and not m.get("auto_offset_skipped")
 
     @property
     def error_source(self) -> str:
@@ -416,6 +535,7 @@ class GazeMapper:
             "z_max": None if self.z_max is None else self.z_max.tolist(),
             "offset": [float(self.offset[0]), float(self.offset[1])],
             "pose_ref": None if self.pose_ref is None else [float(v) for v in self.pose_ref],
+            "blink_model": None if self.blink_model is None else self.blink_model.to_dict(),
             "metrics": self.metrics,
         }
 
@@ -453,6 +573,8 @@ class GazeMapper:
                 mapper.pose_ref = np.asarray(data["pose_ref"], dtype=float)
                 if mapper.pose_ref.shape != (len(POSE_COLS),) or not np.isfinite(mapper.pose_ref).all():
                     mapper.pose_ref = None  # opcional: sin referencia solo se pierde el aviso de deriva
+            if data.get("blink_model") is not None:
+                mapper.blink_model = GazeEarModel.from_dict(data["blink_model"])  # opcional (None si inválido)
             mapper.metrics = dict(data.get("metrics", {}))
         except CalibrationError:
             raise
@@ -582,6 +704,7 @@ class CalibrationResult:
     val_features: Optional[np.ndarray] = None  # (m, d) muestras de los puntos de validación
     val_targets: Optional[np.ndarray] = None
     val_groups: Optional[np.ndarray] = None
+    ear_points: Optional[np.ndarray] = None  # (k, 2) por punto: [altura del iris, EAR] medianos (GazeEarModel)
 
     @property
     def has_validation(self) -> bool:
@@ -605,6 +728,11 @@ class CalibrationSession:
     Con `robust` (por defecto) se descartan además los cuadros de los `post_blink_s` siguientes a un
     parpadeo y, al cerrar cada punto, los atípicos y las poses de cabeza fuera de rango
     (filter_point_samples); `min_samples` se cuenta después de filtrar.
+
+    Si `update` recibe el EAR (`ear=`, lo que hace la aplicación), los ojos cerrados se deciden con el
+    EAR del propio punto (local_open_mask) y no con `eyes_closed` del BlinkDetector global, que tomaba la
+    mirada hacia abajo por un cierre. Además se guarda por punto la altura del iris y el EAR medianos
+    (`ear_points` del resultado) para ajustar el GazeEarModel del control.
     """
 
     def __init__(
@@ -647,6 +775,9 @@ class CalibrationSession:
         self.message = ""
         self._phase_start: Optional[float] = None
         self._samples: List[np.ndarray] = []
+        self._sample_t: List[float] = []
+        self._sample_ear: List[float] = []
+        self._ear_points: List[Tuple[float, float]] = []
         self._done_features: List[np.ndarray] = []
         self._done_targets: List[np.ndarray] = []
         self._done_groups: List[np.ndarray] = []
@@ -688,10 +819,23 @@ class CalibrationSession:
         span = self.settle_s if self.phase == PHASE_SETTLING else self.capture_s
         return float(min(1.0, max(0.0, (now - self._phase_start) / span)))
 
-    def update(self, timestamp: float, features: Optional[np.ndarray], valid: bool, eyes_closed: bool = False) -> str:
-        """Procesa un cuadro (o un tick sin rostro con valid=False). Devuelve la fase actual."""
+    def update(
+        self,
+        timestamp: float,
+        features: Optional[np.ndarray],
+        valid: bool,
+        eyes_closed: bool = False,
+        ear: Optional[float] = None,
+    ) -> str:
+        """Procesa un cuadro (o un tick sin rostro con valid=False). Devuelve la fase actual.
+        Con `ear` (y robust) se ignora `eyes_closed`: el cierre se decide por punto al terminarlo."""
         if self.finished:
             return self.phase
+        local = self.robust and ear is not None
+        if local:
+            eyes_closed = False
+        elif eyes_closed:
+            valid = False
         if eyes_closed:
             self._last_closed = timestamp
         if valid and self.robust and self._last_closed is not None and timestamp - self._last_closed < self.post_blink_s:
@@ -711,13 +855,29 @@ class CalibrationSession:
                 return self.phase
             if valid and features is not None:
                 self._samples.append(np.asarray(features, dtype=float).copy())
+                self._sample_t.append(float(timestamp))
+                self._sample_ear.append(float("nan") if ear is None else float(ear))
         return self.phase
 
     def _clean_samples(self):
         if self.robust and self._samples:
-            keep = filter_point_samples(np.vstack(self._samples))
+            keep = local_open_mask(np.asarray(self._sample_t), np.asarray(self._sample_ear), post_blink_s=self.post_blink_s)
+            x = np.vstack(self._samples)
+            if keep.any():
+                keep[keep] = filter_point_samples(x[keep])
             self.discarded += int((~keep).sum())
             self._samples = [s for s, k in zip(self._samples, keep) if k]
+            self._sample_ear = [e for e, k in zip(self._sample_ear, keep) if k]
+        self._sample_t = []
+
+    def _reset_samples(self):
+        self._samples, self._sample_t, self._sample_ear = [], [], []
+
+    def _record_ear_point(self):
+        """Altura del iris y EAR medianos del punto aceptado (para GazeEarModel)."""
+        ears = np.asarray(self._sample_ear, dtype=float)
+        if len(ears) and np.isfinite(ears).all():
+            self._ear_points.append((float(np.median(iris_height(np.vstack(self._samples)))), float(np.median(ears))))
 
     def _finish_attempt(self, timestamp: float):
         self._clean_samples()
@@ -731,7 +891,8 @@ class CalibrationSession:
             self._done_features.append(np.vstack(self._samples))
             self._done_targets.append(np.tile([tx, ty], (n, 1)))
             self._done_groups.append(np.full(n, idx))
-            self._samples = []
+            self._record_ear_point()
+            self._reset_samples()
             self.retries = 0
             self.message = ""
             if idx + 1 >= self.total:
@@ -754,7 +915,7 @@ class CalibrationSession:
             self.message = (
                 f"Punto {idx + 1}: pocas muestras válidas ({n}); reintentando ({self.retries}/{self.max_retries})."
             )
-            self._samples = []
+            self._reset_samples()
         self.phase = PHASE_SETTLING
         self._phase_start = timestamp
 
@@ -766,19 +927,20 @@ class CalibrationSession:
             self._val_features.append(np.vstack(self._samples))
             self._val_targets.append(np.tile([tx, ty], (n, 1)))
             self._val_groups.append(np.full(n, idx))
+            self._record_ear_point()
             self.message = ""
         elif self.retries < self.max_retries:
             self.retries += 1
             self.message = (
                 f"Validación {idx + 1}: pocas muestras válidas ({n}); reintentando ({self.retries}/{self.max_retries})."
             )
-            self._samples = []
+            self._reset_samples()
             self.phase = PHASE_SETTLING
             self._phase_start = timestamp
             return
         else:
             self.message = f"Se omitió el punto de validación {idx + 1}: solo {n} muestras válidas."
-        self._samples = []
+        self._reset_samples()
         self.retries = 0
         if idx + 1 >= len(self.validation):
             self.phase = PHASE_DONE
@@ -793,8 +955,13 @@ class CalibrationSession:
         val = (None, None, None)
         if self._val_features:
             val = (np.vstack(self._val_features), np.vstack(self._val_targets), np.concatenate(self._val_groups))
+        ear_points = np.asarray(self._ear_points, dtype=float) if self._ear_points else None
         return CalibrationResult(
-            np.vstack(self._done_features), np.vstack(self._done_targets), np.concatenate(self._done_groups), *val
+            np.vstack(self._done_features),
+            np.vstack(self._done_targets),
+            np.concatenate(self._done_groups),
+            *val,
+            ear_points=ear_points,
         )
 
 
@@ -808,6 +975,7 @@ def fit_session(session: CalibrationSession, options: Optional[dict] = None) -> 
     else:
         mapper.fit(res.features, res.targets, res.groups)
     mapper.metrics["discarded_samples"] = int(session.discarded)
+    mapper.blink_model = GazeEarModel.fit(res.ear_points)
     return mapper
 
 

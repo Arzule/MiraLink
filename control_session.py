@@ -63,6 +63,7 @@ class ControlSession(QObject):
     failed = Signal(str)
     recentered = Signal(str)  # resultado de "Recentrar" (aplicado o motivo del fallo)
     pose_warning = Signal(str)  # aviso de deriva de la cabeza ("" = se quitó el aviso)
+    camera_status = Signal(str)  # resolución y fps que entrega la cámara (al medirse y si cambian)
     _hotkey_pressed = Signal()  # el hilo del atajo emite; se atiende en el hilo de la GUI
     _recenter_pressed = Signal()
 
@@ -82,7 +83,7 @@ class ControlSession(QObject):
         parent=None,
         recenter_hotkey_factory: Optional[Callable[[Callable[[], None]], object]] = None,
         recenter_screen_factory: Optional[Callable[..., object]] = None,
-        camera_size_getter: Callable[[], Tuple[int, int]] = lambda: (640, 480),
+        camera_size_getter: Callable[[], Optional[Tuple[int, int]]] = lambda: None,  # None = nativa
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -109,6 +110,8 @@ class ControlSession(QObject):
         self.recenter_screen = None
         self.pose_monitor: Optional[PoseDriftMonitor] = None
         self._pose_warning_shown = False
+        self.camera_status_text = ""
+        self._camera_status_at = None
         self.feedback = None
         self.mouse = None
         self.running = False
@@ -200,7 +203,8 @@ class ControlSession(QObject):
                 from eye_tracker import TrackerThread
 
                 size = self.camera_size_getter()
-                factory = lambda i: TrackerThread(i, camera_size=size)  # noqa: E731
+                blink_model = getattr(mapper, "blink_model", None)  # EAR esperado según la altura de la mirada
+                factory = lambda i: TrackerThread(i, camera_size=size, blink_model=blink_model)  # noqa: E731
             self.tracker = factory(self.camera_index_getter())
             self.tracker.frame_ready.connect(self._on_frame)
             self.tracker.failed.connect(self._on_tracker_failed)
@@ -299,6 +303,7 @@ class ControlSession(QObject):
     def _on_frame(self, frame):
         if not self.running or self.controller is None:
             return
+        self._check_camera(frame)
         self._check_pose(frame)
         if self.recenter_screen is not None:
             self.recenter_screen.on_frame(frame)  # mientras se recentra, el cursor no se mueve
@@ -310,6 +315,23 @@ class ControlSession(QObject):
             return
         if self.feedback is not None:
             self.feedback.update_snapshot(snap)
+
+    def _check_camera(self, frame):
+        """Resolución y fps reales de la cámara para la etiqueta de estado (cada 5 s como mucho)."""
+        fps = float(getattr(frame, "fps", 0.0) or 0.0)
+        ts = float(getattr(frame, "timestamp", 0.0))
+        if not fps or (self._camera_status_at is not None and ts - self._camera_status_at < 5.0):
+            return
+        from eye_tracker import MIN_CAMERA_FPS
+
+        self._camera_status_at = ts
+        info = getattr(frame, "camera_info", "") or ""
+        text = f"Cámara: {info} · {fps:.0f} fps" if info else f"Cámara: {fps:.0f} fps"
+        if fps < MIN_CAMERA_FPS:
+            text += f" (menos de {MIN_CAMERA_FPS:.0f}: mejora la iluminación)"
+        if text != self.camera_status_text:
+            self.camera_status_text = text
+            self.camera_status.emit(text)
 
     def _check_pose(self, frame):
         """Aviso de deriva: compara la pose de la cabeza con la de la calibración."""

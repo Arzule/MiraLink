@@ -498,6 +498,11 @@ class CursorController:
                 self._release("blink", ts)
             return
         if float(self._cfg("blink_click_ms")) <= duration <= float(self._cfg("blink_max_ms")):
+            if getattr(event, "gaze_suspect", False):
+                # Mirada por debajo de la fila más baja calibrada: el párpado baja solo y el "parpadeo"
+                # puede no ser intencional. No se hace clic (el hold con dwell sigue disponible).
+                self._emit("click_blocked")
+                return
             self.mouse.click()
             self._ignore_until = ts + POST_ACTION_IGNORE_S
             self._anchor = None  # el clic reinicia el dwell

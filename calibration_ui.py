@@ -206,8 +206,10 @@ class CalibrationScreen(QWidget):
         self.mini.on_frame(frame)
         if self.recorder is not None:
             self.recorder.add(frame, self.session)  # con el punto que se mostraba al llegar el cuadro
-        valid = bool(frame.face_found and not frame.eyes_closed and frame.features is not None)
-        self.session.update(frame.timestamp, frame.features, valid, eyes_closed=bool(frame.eyes_closed))
+        # Los ojos cerrados los decide la sesión con el EAR de cada punto (mirar abajo baja el párpado)
+        valid = bool(frame.face_found and frame.features is not None)
+        ear = float(frame.ear_mean) if frame.face_found else None
+        self.session.update(frame.timestamp, frame.features, valid, eyes_closed=bool(frame.eyes_closed), ear=ear)
         self._check_finished()
         self._sync_layout()
         self.update()
@@ -576,8 +578,15 @@ class RecenterScreen(QWidget):
 
 
 # ------------------------------------------------------ diálogo de resultado
-def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 0, raw_px: Optional[float] = None) -> str:
-    """Explica qué error se muestra al final de la calibración."""
+def error_source_text(
+    source: str,
+    cv_px: Optional[float] = None,
+    points: int = 0,
+    raw_px: Optional[float] = None,
+    skipped_px: Optional[float] = None,
+) -> str:
+    """Explica qué error se muestra al final de la calibración. `skipped_px`: error que habría dado la
+    corrección automática cuando no se aplicó porque no mejoraba."""
     if source == "validation_corrected":
         text = (
             f"Medido en {points} puntos de validación nuevos tras corregir automáticamente el desvío común "
@@ -588,6 +597,10 @@ def error_source_text(source: str, cv_px: Optional[float] = None, points: int = 
         return text
     if source == "validation":
         text = f"Medido en {points} puntos de validación nuevos, no usados para calibrar (error real)."
+        if skipped_px is not None:
+            text += (
+                f" No se aplicó la corrección automática del desvío común: no mejoraba (~{int(round(skipped_px))} px)."
+            )
         if cv_px is not None:
             text += f" Validación cruzada de los 9 puntos: ~{int(round(cv_px))} px."
         return text
@@ -607,6 +620,7 @@ class CalibrationResultDialog(QDialog):
         cv_px: Optional[float] = None,
         points: int = 0,
         raw_px: Optional[float] = None,
+        skipped_px: Optional[float] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Calibración completada")
@@ -621,7 +635,7 @@ class CalibrationResultDialog(QDialog):
         self.message_label.setWordWrap(True)
         self.message_label.setAccessibleName("Resultado de la calibración")
         layout.addWidget(self.message_label)
-        self.source_label = QLabel(error_source_text(source, cv_px, points, raw_px) if source else "")
+        self.source_label = QLabel(error_source_text(source, cv_px, points, raw_px, skipped_px) if source else "")
         self.source_label.setObjectName("description")
         self.source_label.setWordWrap(True)
         self.source_label.setAccessibleName("Origen del error estimado")
@@ -663,15 +677,17 @@ def default_camera_lister() -> List[int]:
     return list_cameras()
 
 
-def default_tracker_factory(camera_index: int, camera_size=(640, 480)):
+def default_tracker_factory(camera_index: int, camera_size=None):
     from eye_tracker import TrackerThread
 
-    return TrackerThread(camera_index, camera_size=camera_size)
+    return TrackerThread(camera_index, camera_size=camera_size)  # None = resolución nativa
 
 
 def camera_size_from_config(config: dict):
-    cam = config.get("camera", {}) if isinstance(config, dict) else {}
-    return int(cam.get("width", 640)), int(cam.get("height", 480))
+    """None = resolución nativa (por defecto); (ancho, alto) si camera.resolution es "fixed"."""
+    from config_manager import camera_size
+
+    return camera_size(config)
 
 
 def guidance_text(face_ok: bool, hint: str, interocular: float) -> str:
@@ -1024,6 +1040,7 @@ class CalibrationDialog(QDialog):
             cv_px=mapper.metrics.get("cv_rmse_px"),
             points=int(mapper.metrics.get("validation_points", 0)),
             raw_px=mapper.metrics.get("validation_px"),
+            skipped_px=mapper.metrics.get("validation_corrected_px") if mapper.metrics.get("auto_offset_skipped") else None,
         )
         accepted = self._result_dialog_exec(dlg)
         if accepted:

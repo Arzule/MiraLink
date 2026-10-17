@@ -26,6 +26,7 @@ FLASH_MS = 250.0
 DRY_LABEL_S = 1.0
 EVENT_LABELS = {
     "click": "Clic",
+    "click_blocked": "Clic bloqueado (mirada abajo)",
     "hold_start": "Mantener",
     "hold_end": "Soltar",
     "hold_timeout": "Soltado (tiempo máximo)",

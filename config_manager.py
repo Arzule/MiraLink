@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+from typing import Optional, Tuple
 
 from app_paths import data_dir
 
@@ -13,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "version": 1,
-    "camera": {"device_index": 0, "width": 640, "height": 480},
+    # resolution "native": la mayor resolución que la cámara sostiene a ~30 fps (hasta 1920x1080);
+    # "fixed": width x height (si no llega a ~24 fps se usa 640x480)
+    "camera": {"device_index": 0, "resolution": "native", "width": 640, "height": 480},
     "interaction": {
         "dwell_hold_ms": 1200,
         "blink_click_ms": 250,
@@ -60,6 +63,17 @@ def _clamp(value, min_val, max_val):
     return value
 
 
+CAMERA_RESOLUTION_MODES = ("native", "fixed")
+
+
+def camera_size(config) -> Optional[Tuple[int, int]]:
+    """Tamaño que se pide a la cámara: None = resolución nativa; (ancho, alto) con resolution "fixed"."""
+    cam = config.get("camera", {}) if isinstance(config, dict) else {}
+    if not isinstance(cam, dict) or cam.get("resolution", "native") != "fixed":
+        return None
+    return int(cam.get("width", 640)), int(cam.get("height", 480))
+
+
 def _validate_config(config):
     """Valida y corrige valores según rangos especificados."""
     validated = json.loads(json.dumps(config))  # copia profunda
@@ -74,7 +88,9 @@ def _validate_config(config):
         validated["camera"]["device_index"] = device_index
     except Exception:
         validated["camera"]["device_index"] = DEFAULT_CONFIG["camera"]["device_index"]
-    # resolución pedida a la cámara (si no la entrega a ~30 fps, eye_tracker cae a 640x480)
+    # resolución: nativa (por defecto) o fija width x height (si no la entrega a ~24 fps, eye_tracker cae a 640x480)
+    if validated["camera"].get("resolution") not in CAMERA_RESOLUTION_MODES:
+        validated["camera"]["resolution"] = DEFAULT_CONFIG["camera"]["resolution"]
     for key, lo, hi in (("width", 160, 1920), ("height", 120, 1080)):
         try:
             validated["camera"][key] = _clamp(int(validated["camera"].get(key, DEFAULT_CONFIG["camera"][key])), lo, hi)

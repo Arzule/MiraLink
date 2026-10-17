@@ -91,15 +91,18 @@ def check_environment():
 
 
 def parse_resolution(args):
-    """`--resolution 1280x720` -> (1280, 720); None si no se pidió. Lanza ValueError si es inválida."""
+    """`--resolution 1280x720` -> (1280, 720); `--resolution native` -> "native"; None si no se pidió.
+    Lanza ValueError si es inválida."""
     if "--resolution" not in args:
         return None
     i = args.index("--resolution")
+    if i + 1 < len(args) and args[i + 1].lower() in ("native", "nativa"):
+        return "native"
     try:
         w, h = args[i + 1].lower().split("x")
         size = (int(w), int(h))
     except (IndexError, ValueError):
-        raise ValueError("Uso: --resolution ANCHOxALTO, por ejemplo --resolution 1280x720") from None
+        raise ValueError("Uso: --resolution ANCHOxALTO (por ejemplo 1280x720) o --resolution native") from None
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError("La resolución debe ser positiva")
     return size
@@ -109,8 +112,9 @@ def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
     """`--record-session`: calibración de 9 puntos + validación con 5 puntos nuevos, grabando cada cuadro.
 
     Cada intento (completado o cancelado) se guarda en sessions/session_<fecha>.npz. "Aceptar" también
-    guarda calibration.json, como en la calibración normal. `resolution` sustituye camera.width/height
-    solo para esta grabación (si la cámara no la sostiene a ~30 fps se usa 640x480 y queda anotado).
+    guarda calibration.json, como en la calibración normal. `resolution` ((ancho, alto) o "native")
+    sustituye la resolución de config.json solo para esta grabación (si la cámara no sostiene ~24 fps a
+    ese tamaño se usa 640x480 y queda anotado).
     """
     from PySide6.QtWidgets import QApplication
 
@@ -129,8 +133,10 @@ def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
 
         dialog_factory = CalibrationDialog
     config = load_config()
-    if resolution:
-        config.setdefault("camera", {}).update(width=int(resolution[0]), height=int(resolution[1]))
+    if resolution == "native":
+        config.setdefault("camera", {})["resolution"] = "native"
+    elif resolution:
+        config.setdefault("camera", {}).update(resolution="fixed", width=int(resolution[0]), height=int(resolution[1]))
     dialog = dialog_factory(config, record_dir=record_dir)
     dialog.finished.connect(app.quit)
     dialog.show()
@@ -296,11 +302,11 @@ def main(argv=None):
             return 2
         return run_record_session(resolution=resolution)
     if "--tracker-debug" in args:
-        from config_manager import load_config
+        from config_manager import camera_size, load_config
         from eye_tracker import run_tracker_debug
 
-        cam = load_config()["camera"]
-        return run_tracker_debug(cam["device_index"], (cam["width"], cam["height"]))
+        config = load_config()
+        return run_tracker_debug(config["camera"]["device_index"], camera_size(config))
     dry_run = "--dry-run" in args
     if "--config" in args:
         from PySide6.QtWidgets import QApplication

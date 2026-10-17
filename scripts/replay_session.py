@@ -22,6 +22,8 @@ from gaze_session import (  # noqa: E402
     default_variants,
     evaluate,
     fit_label,
+    blink_report,
+    format_blink_report,
     format_posture_report,
     format_table,
     posture_report,
@@ -75,6 +77,10 @@ def main(argv=None) -> int:
     print(describe(session))
     try:
         print(format_posture_report(posture_report(session)))
+    except ValueError as e:
+        print(e)
+    try:
+        print(format_blink_report(blink_report(session)))
     except ValueError as e:
         print(e)
     print()
