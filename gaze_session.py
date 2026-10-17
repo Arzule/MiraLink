@@ -22,6 +22,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from app_paths import data_dir
+
 from calibration import (
     AGGREGATES,
     DEFAULT_FIT,
@@ -47,7 +49,7 @@ PHASE_CODES = {PHASE_SETTLING: 0, PHASE_CAPTURING: 1}  # cualquier otra fase -> 
 
 
 def default_sessions_dir() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), SESSIONS_DIRNAME)
+    return os.path.join(data_dir(), SESSIONS_DIRNAME)
 
 
 def make_session_meta(

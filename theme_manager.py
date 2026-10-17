@@ -2,13 +2,14 @@
 
 import os
 
+from app_paths import resource_path
+
 # TODO(etapa 1)
 
 
 def _get_styles_dir():
-    """Devuelve la ruta de la carpeta styles del proyecto."""
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(project_root, "styles")
+    """Devuelve la ruta de la carpeta styles (en el .exe, la empaquetada dentro del ejecutable)."""
+    return resource_path("styles")
 
 
 def list_themes(styles_dir=None):
