@@ -24,6 +24,8 @@ from gaze_session import (  # noqa: E402
     fit_label,
     blink_report,
     format_blink_report,
+    format_head_motion_report,
+    head_motion_report,
     format_posture_report,
     format_table,
     posture_report,
@@ -66,11 +68,12 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--distance-cm", type=float, default=60.0)
     parser.add_argument("--quick", action="store_true", help="omitir la comparativa de modelos")
+    parser.add_argument("--head-motion", action="store_true", help="con --synthetic: incluir la fase de cabeza")
     args = parser.parse_args(argv)
     if not args.session and not args.synthetic:
         parser.error("indica un archivo de sesión o --synthetic")
     try:
-        session = synthesize_session(args.seed) if args.synthetic else load_session(args.session)
+        session = synthesize_session(args.seed, head_motion=args.head_motion) if args.synthetic else load_session(args.session)
     except ValueError as e:
         print(e)
         return 1
@@ -81,6 +84,10 @@ def main(argv=None) -> int:
         print(e)
     try:
         print(format_blink_report(blink_report(session)))
+    except ValueError as e:
+        print(e)
+    try:
+        print(format_head_motion_report(head_motion_report(session, args.distance_cm * 10.0)))
     except ValueError as e:
         print(e)
     print()

@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from calibration import (
+    HEAD_MOTION_STEPS,
+    STAGE_HEAD,
     STAGE_VALIDATION,
     WARN_ERROR_PX,
     CalibrationSession,
@@ -223,6 +225,12 @@ class CalibrationScreen(QWidget):
         if self._finished:
             return
         if self.hold.completed(now):
+            if self.session.in_head:
+                # La calibración ya está completa: ESC solo salta la fase de movimiento de cabeza
+                self.hold.release()
+                self.session.skip_head()
+                self._check_finished()
+                return
             self._abort("Calibración cancelada.")
             return
         if now - self._last_frame_wall > self.FRAME_WATCHDOG_S:
@@ -288,14 +296,14 @@ class CalibrationScreen(QWidget):
         """Zonas de título, aviso ESC y mini previsualización.
 
         Calibración: entre filas de puntos (10/50/90 %), título al 30 % y aviso al 70 %.
-        Validación (puntos al 30/56/70 %; la cuadrícula ya no se dibuja): título arriba (10 %) y
-        aviso abajo (92 %).
+        Validación (puntos al 30/56/70 %; la cuadrícula ya no se dibuja) y movimiento de cabeza (punto
+        central): título arriba (10 %) y aviso abajo (92 %).
         """
         stage = stage or self.session.stage
         w, h = self.width(), self.height()
         title_h = min(0.24 * h, 170)
         notice_w = min(w * 0.5, 560)
-        if stage == STAGE_VALIDATION:
+        if stage in (STAGE_VALIDATION, STAGE_HEAD):
             title_y, band_y = 0.10, 0.92
         else:
             title_y, band_y = 0.30, 0.70
@@ -329,8 +337,9 @@ class CalibrationScreen(QWidget):
         now = self.clock()
 
         validating = s.in_validation
-        # puntos inactivos tenues (en validación no se dibuja la cuadrícula: no distrae)
-        for i in range(0 if validating else s.total):
+        head = s.in_head
+        # puntos inactivos tenues (en validación y en la fase de cabeza no se dibuja la cuadrícula)
+        for i in range(0 if (validating or head) else s.total):
             if i == s.point_index and not s.finished:
                 continue
             c = self.logical_point(i)
@@ -343,7 +352,9 @@ class CalibrationScreen(QWidget):
 
         # punto activo con anillos y etiqueta
         if not s.finished:
-            if validating:
+            if head:
+                c = QPointF(s.center[0] / self.dpr, s.center[1] / self.dpr)
+            elif validating:
                 c = self.logical_validation_point(s.validation_index)
             else:
                 c = self.logical_point(s.point_index)
@@ -372,16 +383,28 @@ class CalibrationScreen(QWidget):
         t = regions["title"]
         p.setPen(TEXT)
         p.setFont(_font(26 * scale, True))
-        p.drawText(QRectF(t.x(), t.y(), t.width(), t.height() * 0.38), Qt.AlignCenter, "Calibrando Rastreador Ocular")
-        p.setPen(TEXT_SECONDARY)
-        p.setFont(_font(14 * scale))
-        subtitle = (
-            "Comprobando la precisión con puntos nuevos. Mira cada punto."
-            if validating
-            else "Mira cada punto resaltado hasta que se fije."
+        title = "Movimiento de cabeza" if head else "Calibrando Rastreador Ocular"
+        p.drawText(QRectF(t.x(), t.y(), t.width(), t.height() * 0.38), Qt.AlignCenter, title)
+        p.setPen(TEXT if head else TEXT_SECONDARY)
+        p.setFont(_font((16 if head else 14) * scale, head))
+        if head:
+            step = s.head_step
+            subtitle = step[1] if step else ""
+        elif validating:
+            subtitle = "Comprobando la precisión con puntos nuevos. Mira cada punto."
+        else:
+            subtitle = "Mira cada punto resaltado hasta que se fije."
+        p.drawText(
+            QRectF(t.x(), t.y() + t.height() * 0.38, t.width(), t.height() * 0.30),
+            Qt.AlignCenter | Qt.TextWordWrap,
+            subtitle,
         )
-        p.drawText(QRectF(t.x(), t.y() + t.height() * 0.38, t.width(), t.height() * 0.26), Qt.AlignCenter, subtitle)
-        if validating:
+        if head:
+            n_head = len(s.head_motion)
+            moving = s.phase == "capturing"
+            action = ("Quieto" if s.head_step and s.head_step[0] == "still" else "Ahora, despacio") if moving else "Prepárate"
+            pill_text = f"Paso {min(s.head_index + 1, n_head)} de {n_head}: {action}"
+        elif validating:
             n_val = len(s.validation)
             pill_text = f"Validación {min(s.validation_index + 1, n_val)} de {n_val}"
         else:
@@ -418,7 +441,9 @@ class CalibrationScreen(QWidget):
         p.drawText(
             QRectF(chip.right() + 12, n.y() + 6, n.width() - chip.width() - 40, n.height() - 18),
             Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap,
-            "Mantén presionada ESC para salir de la calibración",
+            "Mantén presionada ESC para saltar este paso final (la calibración ya está hecha)"
+            if head
+            else "Mantén presionada ESC para salir de la calibración",
         )
         hp = self.hold.progress(now)
         bar = QRectF(n.x() + 14, n.bottom() - 10, n.width() - 28, 5)
@@ -953,7 +978,9 @@ class CalibrationDialog(QDialog):
             geom = screen_geometry_from_qt(screen)
             val = validation_points(geom["width"], geom["height"]) if self.validation else None
             # orden balanceado: un movimiento de cabeza no queda ligado a la fila/columna del punto
-            session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced")
+            # --record-session añade la fase de movimiento de cabeza (datos para compensarla más adelante)
+            head = HEAD_MOTION_STEPS if self.record_dir else None
+            session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced", head_motion=head)
             logger.info("Orden de los puntos de calibración: %s", session.order)
             self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
             scr = CalibrationScreen(

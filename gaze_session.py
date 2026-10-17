@@ -32,6 +32,7 @@ from calibration import (
     PHASE_CAPTURING,
     PHASE_SETTLING,
     STAGE_VALIDATION,
+    HEAD_MOTION_STEPS,
     CalibrationSession,
     GazeEarModel,
     GazeMapper,
@@ -56,7 +57,7 @@ SESSION_VERSION = 1
 SESSIONS_DIRNAME = "sessions"
 DEFAULT_DISTANCE_MM = 600.0  # distancia de visión supuesta para convertir px a grados
 
-STAGE_CODES = {"calibration": 0, "validation": 1}
+STAGE_CODES = {"calibration": 0, "validation": 1, "head": 2}
 PHASE_CODES = {PHASE_SETTLING: 0, PHASE_CAPTURING: 1}  # cualquier otra fase -> 2
 
 
@@ -87,6 +88,9 @@ def make_session_meta(
         "validation_points": [list(map(float, p)) for p in session.validation],
         "settle_s": session.settle_s,
         "capture_s": session.capture_s,
+        # fase de movimiento de cabeza (stage 2, point = paso): [clave, segundos de movimiento]
+        "head_motion_steps": [[str(k), float(sec)] for k, _text, sec in getattr(session, "head_motion", [])],
+        "head_settle_s": float(getattr(session, "head_settle_s", 0.0)),
         "config": config or {},
     }
     if extra:
@@ -375,14 +379,30 @@ class SyntheticUser:
         k = min(1.0, dt / self.head_tau)
         return x + (mu - x) * k + sigma * math.sqrt(2.0 * k) * self.rng.normal(size=np.shape(x))
 
-    def frame(self, t: float, target: Tuple[float, float], stage: str = "calibration") -> TrackingFrame:
+    # Movimiento guionado de la fase de cabeza: amplitud de cada paso (2 ciclos por paso)
+    HEAD_MOTION_AMPLITUDE = {"yaw": 0.25, "pitch": 0.15, "depth": 100.0}  # rad, rad, mm
+
+    def frame(
+        self, t: float, target: Tuple[float, float], stage: str = "calibration", motion: Optional[Tuple[str, float]] = None
+    ) -> TrackingFrame:
+        """`motion` = (clave del paso de HEAD_MOTION_STEPS, avance 0..1) mientras se mueve la cabeza."""
         dt = 1.0 / 30.0 if self._t is None else max(1e-3, t - self._t)
         self._t = t
-        shift = stage == STAGE_VALIDATION
+        shift = stage in (STAGE_VALIDATION, "head")
         mu_pos = np.array([0.0, 0.0, self.distance]) + (self.val_shift_mm if shift else 0.0)
         mu_rot = np.array([0.0, -0.05, 0.0]) + (self.val_shift_rad if shift else 0.0)
         self.pos = self._ou(self.pos, mu_pos, self.head_sigma_mm, dt)
         self.rot = self._ou(self.rot, mu_rot, self.head_sigma_rad, dt)
+        pos, rot = self.pos, self.rot
+        if motion is not None and motion[0] in self.HEAD_MOTION_AMPLITUDE:
+            wave = self.HEAD_MOTION_AMPLITUDE[motion[0]] * math.sin(4.0 * math.pi * motion[1])
+            pos, rot = pos.copy(), rot.copy()
+            if motion[0] == "yaw":
+                rot[0] += wave
+            elif motion[0] == "pitch":
+                rot[1] += wave
+            else:
+                pos[2] += wave
 
         # la mirada cambia de objetivo con una latencia de reacción
         target = (float(target[0]), float(target[1]))
@@ -405,7 +425,7 @@ class SyntheticUser:
         closed = t < self._blink_end
         reopening = (not closed) and t < self._blink_end + 0.1
 
-        feats = self._features(gx, gy, closed, reopening)
+        feats = self._features(gx, gy, closed, reopening, pos, rot)
         return TrackingFrame(
             timestamp=t,
             face_found=True,
@@ -418,11 +438,11 @@ class SyntheticUser:
             eyes_closed=closed,
         )
 
-    def _features(self, gx, gy, closed, reopening) -> np.ndarray:
+    def _features(self, gx, gy, closed, reopening, pos=None, rot=None) -> np.ndarray:
         """Vector completo (10 rasgos, incluye roll); se recorta a FEATURE_DIM."""
         rng = self.rng
-        hx, hy, hz = self.pos
-        yaw, pitch, roll = self.rot
+        hx, hy, hz = self.pos if pos is None else pos
+        yaw, pitch, roll = self.rot if rot is None else rot
         tx = (gx / self.width - 0.5) * self.phys[0]
         ty = (gy / self.height - 0.5) * self.phys[1]
         ex = math.atan2(tx - hx, hz) - yaw
@@ -468,8 +488,10 @@ def synthesize_session(
     session_kwargs: Optional[dict] = None,
     max_seconds: float = 180.0,
     order: str = "balanced",
+    head_motion: bool = False,
 ) -> RecordedSession:
-    """Sesión sintética que reproduce el flujo real: la CalibrationSession decide puntos, orden y fases."""
+    """Sesión sintética que reproduce el flujo real: la CalibrationSession decide puntos, orden y fases.
+    `head_motion` añade la fase de movimiento de cabeza de --record-session (movimiento guionado)."""
     rng = np.random.default_rng(seed)
     user = SyntheticUser(rng, width, height, physical_mm, **(user_kwargs or {}))
     session = CalibrationSession(
@@ -478,6 +500,7 @@ def synthesize_session(
         validation=validation_points(width, height) if validation else None,
         order=order,
         rng=np.random.default_rng(seed + 1000),
+        head_motion=HEAD_MOTION_STEPS if head_motion else None,
         **(session_kwargs or {}),
     )
     geometry = {"x": 0, "y": 0, "width": width, "height": height}
@@ -491,7 +514,10 @@ def synthesize_session(
         if rng.random() < 0.01:
             dt += 1.0 / fps  # cuadro perdido
         t += max(0.005, dt)
-        frame = user.frame(t, session.current_point, session.stage)
+        motion = None
+        if session.in_head and session.phase == PHASE_CAPTURING:
+            motion = (session.head_step[0], session.phase_progress(t))
+        frame = user.frame(t, session.current_point, session.stage, motion)
         rec.add(frame, session)
         valid = frame.face_found and not frame.eyes_closed and frame.features is not None
         session.update(t, frame.features, valid)
@@ -866,7 +892,7 @@ def posture_report(session: "RecordedSession") -> Dict[str, object]:
     max_dev = 0.0
     warned_at = None
     for i in range(start, len(session)):
-        if valid[i]:
+        if valid[i] and session.stage[i] == STAGE_CODES["validation"]:  # sin la fase de movimiento de cabeza
             if monitor.update(float(session.t[i]), session.features[i]) and warned_at is None:
                 warned_at = float(session.t[i] - session.t[start])
             dev = monitor.deviation()
@@ -901,6 +927,123 @@ def format_posture_report(rep: Dict[str, object]) -> str:
             + (f"el aviso de deriva habría saltado a los {warned:.1f} s" if warned is not None else "sin aviso de deriva")
             + " (en uso real el aviso se mide desde la pose de la validación, que es la que corrige el offset)"
         )
+    return "\n".join(lines)
+
+
+TYPICAL_EYE_SPAN_MM = 93.0  # separación media entre las esquinas externas de los ojos (landmarks 33 y 263)
+HEAD_POSE_COLS = (4, 5, 6, 7, 8)  # nose_x, nose_y, interocular, yaw, pitch
+
+
+def head_motion_report(session: "RecordedSession", distance_mm: float = DEFAULT_DISTANCE_MM) -> Dict[str, object]:
+    """Fase de movimiento de cabeza (stage 2): cuánto se mueve el cursor del ajuste por defecto (solo iris)
+    mientras se mira el punto central moviendo la cabeza, frente a la pose de la calibración.
+
+    Por paso: rango de la pose (p5-p95), dispersión del error y la pendiente del error frente al giro
+    (px/rad) o al desplazamiento, para compararla con la geometría: girar la cabeza un ángulo a desplaza el
+    punto mirado ~distancia x tan(a); en px, x los px/mm del monitor. Es la medida de la fase 1: todavía no
+    hay compensación.
+    """
+    stage = session.stage == STAGE_CODES["head"]
+    if not stage.any():
+        raise ValueError("La sesión no tiene fase de movimiento de cabeza (se graba desde esta versión)")
+    x, y, g = robust_samples(session, "calibration")
+    if len(x) < 3:
+        raise ValueError("No hay muestras de calibración suficientes")
+    mapper = GazeMapper.from_fit_options()
+    if session.has_validation:
+        mapper.fit(x, y, g, *robust_samples(session, "validation"))
+    else:
+        mapper.fit(x, y, g)
+    ref = np.median(x[:, list(HEAD_POSE_COLS)], axis=0)
+    mm = session.meta.get("physical_mm")
+    px_per_mm = session.width / float(mm[0]) if mm else None
+    steps = [s[0] for s in session.meta.get("head_motion_steps") or []]
+    center = np.array([session.width / 2.0, session.height / 2.0])
+    out: Dict[str, object] = {
+        "distance_mm": distance_mm,
+        "px_per_mm": px_per_mm,
+        "geometric_px_per_rad": distance_mm * px_per_mm if px_per_mm else None,
+        "reference": ref,
+        "steps": [],
+    }
+    for k in np.unique(session.point[stage]):
+        m = stage & (session.point == k) & (session.phase == 1) & session.valid_mask()
+        idx = np.flatnonzero(m)
+        if len(idx) < 10:
+            continue
+        keep = local_open_mask(session.t[idx], session.ear[idx]) if session.ear is not None else np.ones(len(idx), bool)
+        idx = idx[keep]
+        if len(idx) < 10:
+            continue
+        feats = session.features[idx]
+        err = mapper.predict(feats) - center
+        d = feats[:, list(HEAD_POSE_COLS)] - ref
+        iod = feats[:, 6]
+        mm_per_unit = TYPICAL_EYE_SPAN_MM / np.maximum(iod, 1e-6)  # mm por unidad normalizada del cuadro
+
+        def span(v):
+            return float(np.percentile(v, 95) - np.percentile(v, 5))
+
+        def slope(v, e):
+            if np.ptp(v) < 1e-6:
+                return None, None
+            s = float(np.polyfit(v, e, 1)[0])
+            r = float(np.corrcoef(v, e)[0, 1]) if np.std(e) > 0 else 0.0
+            return s, r
+
+        key = steps[int(k)] if int(k) < len(steps) else str(int(k))
+        norm = np.linalg.norm(err, axis=1)
+        row = {
+            "key": key,
+            "frames": int(len(idx)),
+            "yaw_deg": span(np.degrees(d[:, 3])),
+            "pitch_deg": span(np.degrees(d[:, 4])),
+            "shift_x_mm": span(d[:, 0] * mm_per_unit),
+            "shift_y_mm": span(d[:, 1] * mm_per_unit),
+            "distance_ratio": (float(np.percentile(ref[2] / iod, 5)), float(np.percentile(ref[2] / iod, 95))),
+            "bias_px": (float(np.median(err[:, 0])), float(np.median(err[:, 1]))),
+            "error_median_px": float(np.median(norm)),
+            "error_p90_px": float(np.percentile(norm, 90)),
+        }
+        row["slope_x_yaw"] = slope(d[:, 3], err[:, 0])
+        row["slope_y_pitch"] = slope(d[:, 4], err[:, 1])
+        row["slope_x_shift"] = slope(d[:, 0] * mm_per_unit, err[:, 0])  # px por mm de desplazamiento
+        out["steps"].append(row)
+    return out
+
+
+def format_head_motion_report(rep: Dict[str, object]) -> str:
+    names = {"still": "quieto", "yaw": "girar izq./der.", "pitch": "subir/bajar barbilla", "depth": "acercarse/alejarse"}
+    lines = ["Movimiento de cabeza (mirando el centro; ajuste por defecto, solo iris, sin compensar la cabeza)"]
+    geo = rep.get("geometric_px_per_rad")
+    if geo:
+        lines.append(f"  geometría a {rep['distance_mm'] / 10:.0f} cm: girar la cabeza 1 rad desplaza el punto mirado ~{geo:.0f} px"
+                     f" ({geo * np.pi / 180:.0f} px/°); 1 mm de desplazamiento = {rep['px_per_mm']:.2f} px")
+
+    def fmt_slope(s, unit):
+        value, r = s
+        return "-" if value is None else f"{value:+.0f} {unit} (r={r:+.2f})"
+
+    for row in rep["steps"]:
+        lo, hi = row["distance_ratio"]
+        lines.append(
+            f"  {names.get(row['key'], row['key'])}: {row['frames']} cuadros; rango giro {row['yaw_deg']:.0f}°, inclinación"
+            f" {row['pitch_deg']:.0f}°, desplazamiento {row['shift_x_mm']:.0f}x{row['shift_y_mm']:.0f} mm, distancia"
+            f" x{lo:.2f}-x{hi:.2f}"
+        )
+        bx, by = row["bias_px"]
+        lines.append(
+            f"      error del cursor: mediana {row['error_median_px']:.0f} px, p90 {row['error_p90_px']:.0f} px,"
+            f" sesgo ({bx:+.0f}, {by:+.0f}) px"
+        )
+        if row["key"] == "yaw":
+            lines.append(f"      pendiente error x / giro: {fmt_slope(row['slope_x_yaw'], 'px/rad')}")
+        elif row["key"] == "pitch":
+            lines.append(f"      pendiente error y / inclinación: {fmt_slope(row['slope_y_pitch'], 'px/rad')}")
+        if row["key"] in ("yaw", "depth"):
+            lines.append(f"      pendiente error x / desplazamiento: {fmt_slope(row['slope_x_shift'], 'px/mm')}")
+    if not rep["steps"]:
+        lines.append("  sin cuadros válidos en la fase de cabeza")
     return "\n".join(lines)
 
 

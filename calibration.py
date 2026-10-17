@@ -649,6 +649,18 @@ PHASE_ABORTED = "aborted"
 
 STAGE_CALIBRATION = "calibration"
 STAGE_VALIDATION = "validation"
+STAGE_HEAD = "head"
+
+# Fase de movimiento de cabeza (solo en --record-session, para medir sin riesgo antes de compensar la
+# cabeza): se mira el punto central mientras la cabeza se mueve como indica cada paso.
+# (clave, instrucción, segundos de movimiento); antes de cada paso hay HEAD_SETTLE_S para leerla.
+HEAD_MOTION_STEPS = (
+    ("still", "Mira el punto sin mover la cabeza.", 3.0),
+    ("yaw", "Sin dejar de mirar el punto, gira la cabeza despacio a la izquierda y a la derecha.", 6.0),
+    ("pitch", "Sin dejar de mirar el punto, sube y baja la barbilla despacio.", 6.0),
+    ("depth", "Sin dejar de mirar el punto, acércate y aléjate de la pantalla despacio.", 6.0),
+)
+HEAD_SETTLE_S = 2.0
 
 # Puntos de validación (fracción de la pantalla): centro desplazado y cuatro intermedios, todos
 # distintos de la cuadrícula 3x3 de calibración. Miden el error real con puntos no usados al ajustar.
@@ -721,6 +733,10 @@ class CalibrationSession:
     Con `validation` (lista de puntos) la sesión sigue con una fase de validación con el mismo
     ritmo; un punto de validación sin muestras suficientes tras los reintentos se omite (no aborta).
 
+    Con `head_motion` (pasos como HEAD_MOTION_STEPS; lo usa --record-session) sigue una fase de
+    movimiento de cabeza mirando el centro: solo marca el ritmo (los cuadros se graban), no recoge
+    muestras, no aborta y no cambia el resultado. `skip_head()` la termina antes.
+
     `order="balanced"` (lo usa la aplicación) presenta los 9 puntos en un orden aleatorio balanceado
     (balanced_order); "grid" (por defecto de la clase) los presenta por filas. `points` está en orden
     de presentación y los grupos del resultado son índices de presentación.
@@ -749,6 +765,8 @@ class CalibrationSession:
         post_blink_s: float = 0.15,
         order: str = "grid",
         rng: Optional[np.random.Generator] = None,
+        head_motion: Optional[List[Tuple[str, str, float]]] = None,
+        head_settle_s: float = HEAD_SETTLE_S,
     ):
         grid = grid_points(width, height, margin)
         if order == "balanced":
@@ -759,6 +777,10 @@ class CalibrationSession:
             raise ValueError(f"orden desconocido: {order}")
         self.points = [grid[i] for i in self.order]  # en orden de presentación
         self.validation = list(validation or [])
+        self.head_motion = [tuple(step) for step in (head_motion or [])]
+        self.head_settle_s = head_settle_s
+        self.center = (width / 2.0, height / 2.0)
+        self.head_index = 0
         self.settle_s = settle_s
         self.capture_s = capture_s
         self.min_samples = min_samples
@@ -794,12 +816,27 @@ class CalibrationSession:
         return self.stage == STAGE_VALIDATION
 
     @property
+    def in_head(self) -> bool:
+        return self.stage == STAGE_HEAD
+
+    @property
+    def head_step(self) -> Optional[Tuple[str, str, float]]:
+        """Paso de movimiento de cabeza activo (clave, instrucción, segundos) o None."""
+        if not self.in_head or not self.head_motion:
+            return None
+        return self.head_motion[min(self.head_index, len(self.head_motion) - 1)]
+
+    @property
     def active_index(self) -> int:
-        """Índice del punto activo dentro de su fase (calibración o validación)."""
+        """Índice del punto (o paso) activo dentro de su fase."""
+        if self.in_head:
+            return self.head_index
         return self.validation_index if self.in_validation else self.point_index
 
     @property
     def current_point(self) -> Tuple[float, float]:
+        if self.in_head:
+            return self.center
         if self.in_validation:
             return self.validation[min(self.validation_index, len(self.validation) - 1)]
         return self.points[min(self.point_index, self.total - 1)]
@@ -816,7 +853,10 @@ class CalibrationSession:
         """Avance 0..1 de la fase actual."""
         if self._phase_start is None or self.finished:
             return 0.0
-        span = self.settle_s if self.phase == PHASE_SETTLING else self.capture_s
+        if self.in_head:
+            span = self.head_settle_s if self.phase == PHASE_SETTLING else self.head_step[2]
+        else:
+            span = self.settle_s if self.phase == PHASE_SETTLING else self.capture_s
         return float(min(1.0, max(0.0, (now - self._phase_start) / span)))
 
     def update(
@@ -831,6 +871,8 @@ class CalibrationSession:
         Con `ear` (y robust) se ignora `eyes_closed`: el cierre se decide por punto al terminarlo."""
         if self.finished:
             return self.phase
+        if self.in_head:
+            return self._update_head(timestamp)
         local = self.robust and ear is not None
         if local:
             eyes_closed = False
@@ -858,6 +900,40 @@ class CalibrationSession:
                 self._sample_t.append(float(timestamp))
                 self._sample_ear.append(float("nan") if ear is None else float(ear))
         return self.phase
+
+    def _update_head(self, timestamp: float) -> str:
+        if self._phase_start is None:
+            self._phase_start = timestamp
+        elapsed = timestamp - self._phase_start
+        if self.phase == PHASE_SETTLING and elapsed >= self.head_settle_s:
+            self.phase = PHASE_CAPTURING
+            self._phase_start = timestamp
+        elif self.phase == PHASE_CAPTURING and elapsed >= self.head_step[2]:
+            self.head_index += 1
+            if self.head_index >= len(self.head_motion):
+                self.head_index = len(self.head_motion) - 1
+                self.phase = PHASE_DONE
+            else:
+                self.phase = PHASE_SETTLING
+                self._phase_start = timestamp
+        return self.phase
+
+    def _complete(self, timestamp: float):
+        """Fin de calibración y validación: pasa a la fase de cabeza si la hay."""
+        if not self.head_motion:
+            self.phase = PHASE_DONE
+            return
+        self.stage = STAGE_HEAD
+        self.head_index = 0
+        self.retries = 0
+        self.message = ""
+        self.phase = PHASE_SETTLING
+        self._phase_start = timestamp
+
+    def skip_head(self):
+        """Termina la fase de movimiento de cabeza (la calibración ya está completa)."""
+        if self.in_head and not self.finished:
+            self.phase = PHASE_DONE
 
     def _clean_samples(self):
         if self.robust and self._samples:
@@ -897,7 +973,7 @@ class CalibrationSession:
             self.message = ""
             if idx + 1 >= self.total:
                 if not self.validation:
-                    self.phase = PHASE_DONE
+                    self._complete(timestamp)
                     return
                 self.stage = STAGE_VALIDATION
                 self.validation_index = 0
@@ -943,7 +1019,7 @@ class CalibrationSession:
         self._reset_samples()
         self.retries = 0
         if idx + 1 >= len(self.validation):
-            self.phase = PHASE_DONE
+            self._complete(timestamp)
             return
         self.validation_index = idx + 1
         self.phase = PHASE_SETTLING

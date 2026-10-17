@@ -484,6 +484,11 @@ class TestRecordSession(UITestBase):
             self.assertEqual(len(sess.meta["validation_points"]), 5)
             self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(9)))
             self.assertEqual(set(sess.point[sess.capture_mask("validation")].tolist()), set(range(5)))
+            # fase de movimiento de cabeza al final (solo en --record-session), mirando el centro
+            head = sess.stage == 2
+            self.assertEqual(set(sess.point[head & (sess.phase == 1)].tolist()), set(range(4)))
+            np.testing.assert_allclose(sess.target[head][0], [geom["width"] / 2, geom["height"] / 2])
+            self.assertEqual([s[0] for s in sess.meta["head_motion_steps"]], ["still", "yaw", "pitch", "depth"])
             self.assertTrue(os.path.isfile(os.path.join(d, "calibration.json")))  # Aceptar también calibra
 
     def test_cancelled_run_is_saved_too(self):
@@ -515,6 +520,7 @@ class TestRecordSession(UITestBase):
             self.pump()
             dlg.start_calibration()
             self.assertIsNone(dlg.calib_screen.recorder)
+            self.assertEqual(dlg.calib_screen.session.head_motion, [])  # sin fase de cabeza
             dlg.reject()
             self.assertEqual(dlg.saved_sessions, [])
 
