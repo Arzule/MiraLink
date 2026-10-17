@@ -139,14 +139,155 @@ def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
     if saved:
         for path in saved:
             print(f"Sesión guardada: {path}")
-        print("Evalúala con: .\\venv\\Scripts\\python.exe scripts\\replay_session.py " + saved[-1])
+        from app_paths import is_frozen
+
+        if not is_frozen():
+            print("Evalúala con: .\\venv\\Scripts\\python.exe scripts\\replay_session.py " + saved[-1])
     else:
         print("No se grabó ninguna sesión.")
     return 0
 
 
+def ensure_streams():
+    """En el .exe sin consola sys.stdout/stderr son None y print() fallaría: se envían a os.devnull
+    (lo importante queda en logs/miralink_debug.log)."""
+    import os
+
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+def ensure_config_file(path=None):
+    """Crea config.json con los valores por defecto si no existe (en el .exe, junto al ejecutable).
+
+    Devuelve (ruta, creado). Si ya existe no se toca: se lee en cada arranque como siempre.
+    """
+    import os
+
+    from config_manager import _get_project_root, load_config, save_config
+
+    path = path or os.path.join(_get_project_root(), "config.json")
+    if os.path.exists(path):
+        return path, False
+    save_config(load_config(path), path)
+    return path, True
+
+
+def run_self_test(out_path=None, show_window=True):
+    """`--self-test`: comprueba el empaquetado SIN cámara ni control del cursor y escribe un informe.
+
+    Verifica librerías, config.json junto al ejecutable, temas, el modelo de MediaPipe empaquetado
+    (crea el FaceLandmarker, no abre la cámara) y que la ventana de configuración se construye y se
+    muestra (se cierra sola). Devuelve 0 si todo está bien.
+    """
+    import io
+    import os
+    import traceback
+    from contextlib import redirect_stdout
+
+    from app_paths import data_dir, is_frozen, resource_path
+
+    lines, ok = [], True
+
+    def check(name, fn):
+        nonlocal ok
+        try:
+            detail = fn()
+            lines.append(f"OK    {name}" + (f": {detail}" if detail else ""))
+        except Exception as e:  # noqa: BLE001 - el informe debe recoger cualquier fallo
+            ok = False
+            lines.append(f"FALLO {name}: {e}")
+            lines.append(traceback.format_exc())
+
+    lines.append(f"MiraLink self-test | ejecutable={is_frozen()} | datos={data_dir()} | recursos={resource_path()}")
+
+    def libraries():
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = check_environment()
+        if code != 0:
+            raise RuntimeError(buf.getvalue().strip().replace("\n", " | "))
+        return buf.getvalue().strip().replace("\n", " | ")
+
+    def config():
+        path, created = ensure_config_file()
+        from config_manager import load_config
+
+        cfg = load_config(path)
+        return f"{path} ({'creado' if created else 'existente'}), suavizado {cfg['interaction']['smoothing_percent']} %"
+
+    def themes():
+        from theme_manager import list_themes, load_theme
+
+        ids = [t["id"] for t in list_themes()]
+        if not ids:
+            raise RuntimeError("no hay temas .qss empaquetados")
+        for theme_id in ids:
+            if "$FONT" in load_theme(theme_id, 1.0):
+                raise RuntimeError(f"tokens sin reemplazar en {theme_id}")
+        return ", ".join(ids)
+
+    def model():
+        from eye_tracker import FaceTracker, default_model_path
+
+        tracker = FaceTracker(auto_download=False)  # debe venir empaquetado; no se abre la cámara
+        tracker.close()
+        return default_model_path()
+
+    def window():
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+
+        from config_ui import ConfigWindow
+
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        win = ConfigWindow()
+        if show_window:
+            win.show()
+            QTimer.singleShot(1500, app.quit)  # se cierra sola
+            app.exec()
+        size = f"{win.width()}x{win.height()}"
+        win.close()
+        return f"ventana {size}, tema {win.theme_combo.currentData()}"
+
+    check("librerías", libraries)
+    check("config.json", config)
+    check("temas", themes)
+    check("modelo de MediaPipe", model)
+    check("ventana de configuración", window)
+    lines.append("RESULTADO: " + ("OK" if ok else "FALLO"))
+    out_path = out_path or os.path.join(data_dir(), "miralink_selftest.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return 0 if ok else 1
+
+
+EXE_MODES = ("--config", "--record-session", "--tracker-debug", "--self-test", "--check")
+
+
+def resolve_args(args, frozen):
+    """En el .exe, sin un modo explícito (doble clic) se abre la ventana de configuración.
+
+    `--check` hace en el .exe lo que `python main.py` sin argumentos: verificar las librerías.
+    """
+    args = list(args)
+    if frozen and not any(a in args for a in EXE_MODES):
+        args.append("--config")
+    return args
+
+
 def main(argv=None):
-    args = list(sys.argv[1:] if argv is None else argv)
+    ensure_streams()
+    from app_paths import is_frozen
+
+    args = resolve_args(sys.argv[1:] if argv is None else argv, is_frozen())
+    if "--self-test" in args:
+        return run_self_test()
+    if any(a in args for a in ("--config", "--record-session", "--tracker-debug")):
+        ensure_config_file()  # config.json junto al .exe (o en el proyecto) se crea la primera vez
     if "--record-session" in args:
         try:
             resolution = parse_resolution(args)

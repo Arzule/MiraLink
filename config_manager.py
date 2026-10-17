@@ -1,9 +1,11 @@
-﻿"""Módulo para cargar y guardar config.json (valores por defecto y validación de rangos)."""
+"""Módulo para cargar y guardar config.json (valores por defecto y validación de rangos)."""
 
 import json
 import logging
 import os
 import tempfile
+
+from app_paths import data_dir
 
 # TODO(etapa 1)
 
@@ -35,7 +37,7 @@ DEFAULT_CONFIG = {
 
 def _get_project_root():
     """Devuelve la ruta de la carpeta del proyecto (donde está este archivo)."""
-    return os.path.dirname(os.path.abspath(__file__))
+    return data_dir()  # en el .exe: la carpeta del .exe (config.json vive ahí)
 
 
 def _deep_merge(base, updates):

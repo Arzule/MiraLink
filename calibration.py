@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+from app_paths import data_dir
+
 CALIBRATION_VERSION = 2  # 2: modelo, alpha por validación cruzada, recorte de extrapolación y offset
 SUPPORTED_VERSIONS = (1, 2)
 CALIBRATION_FILENAME = "calibration.json"
@@ -51,7 +53,7 @@ class CalibrationError(Exception):
 
 
 def default_calibration_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), CALIBRATION_FILENAME)
+    return os.path.join(data_dir(), CALIBRATION_FILENAME)
 
 
 def pad_features(x: np.ndarray) -> np.ndarray:

@@ -1,0 +1,4 @@
+# Solo para construir el ejecutable (no los necesita la aplicación). Instalar con:
+#   .\venv\Scripts\python.exe -m pip install -r requirements-build.txt
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8

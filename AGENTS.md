@@ -197,7 +197,15 @@ Problema reportado con cámara real: desvío considerable aunque el error estima
 - Sesiones reales disponibles en `sessions/` (ignoradas por git): session_20261016_014305 (cerca, por filas), _021359 y _021600 (lejos, orden balanceado).
 - Pendiente del usuario: recalibrar (el calibration.json actual no tiene pose_ref ni la corrección automática), grabar una sesión sentado más cerca (separación de ojos >= 0.21) y con la cabeza quieta, y probar el control: aviso de distancia en el modal, error corregido en el diálogo, aviso "Recentra: Ctrl+Alt+R" al mover la cabeza y Ctrl+Alt+R.
 - Siguiente paso del agente al recibir sesiones: `.\venv\Scripts\python.exe scripts\replay_session.py <sesión>` en cada una y comparar con las anteriores (distancia, desvío sin/con corrección, deriva, ranking de modelos). Revisar si las tolerancias de la pose o el umbral IOD necesitan ajuste.
-- No empezar las etapas 5-7 ni el .exe sin que el usuario lo pida.
+- No empezar las etapas 5-7 sin que el usuario lo pida. El .exe ya existe (pedido por el usuario, ver "Ejecutable").
+
+## Ejecutable (MiraLink.exe)
+- Construir: `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1` (instala `requirements-build.txt` = PyInstaller 6.22.3 solo en el venv, corre los tests, ejecuta `MiraLink.spec` y prueba el .exe con `--self-test` en una carpeta limpia de %TEMP%). `-SkipTests` omite los tests. Salida: `dist\MiraLink.exe` (~150 MB, un solo archivo, sin consola). `build/` y `dist/` están en .gitignore. PyInstaller no va en requirements.txt: la app no lo necesita.
+- Rutas (`app_paths.py`): `data_dir()` = carpeta del .exe (en desarrollo, la raíz del proyecto) para config.json, calibration.json, logs/ y sessions/; `resource_path()` = recursos empaquetados (styles/*.qss, models/face_landmarker.task) que en el .exe se extraen a una carpeta temporal (sys._MEIPASS) que se borra al cerrar: nunca escribir ahí. Ningún módulo debe volver a calcular rutas con `__file__`.
+- config.json NO se empaqueta: `main.ensure_config_file()` lo crea con los valores por defecto junto al .exe la primera vez (también en desarrollo si falta) y se lee en cada arranque; si existe nunca se sobrescribe.
+- Arranque del .exe (`main.resolve_args`): doble clic = `--config`; también acepta `--dry-run`, `--record-session [--resolution WxH]`, `--tracker-debug`, `--check` (verificación de librerías) y `--self-test` (librerías, config.json, temas, crea el FaceLandmarker con el modelo empaquetado SIN abrir la cámara y muestra la ventana 1.5 s; informe en `miralink_selftest.txt` junto al .exe; código 0 si todo va bien). Sin consola, `sys.stdout/stderr` son None: `main.ensure_streams()` los manda a os.devnull; lo importante va a `logs\miralink_debug.log`.
+- MediaPipe carga matplotlib al crear el FaceLandmarker: no excluirlo del spec. UPX desactivado (falsos positivos de antivirus y DLL de Qt rotas).
+- En un .exe de un solo archivo hay dos procesos MiraLink.exe (cargador + aplicación); la ventana es del hijo.
 
 ### Comandos de esta mejora
 - Grabar una sesión real: `.\venv\Scripts\python.exe main.py --record-session` (opcional `--resolution 1280x720`). Archivo en `sessions\session_<fecha>.npz`.

@@ -444,8 +444,9 @@ def list_cameras(max_index: int = 5, opener: Optional[Callable] = None) -> List[
 
 
 def default_model_path() -> str:
-    root = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(root, "models", DEFAULT_MODEL_FILENAME)
+    from app_paths import resource_path
+
+    return resource_path("models", DEFAULT_MODEL_FILENAME)  # en el .exe: empaquetado dentro del ejecutable
 
 
 def ensure_model(model_path: Optional[str] = None, auto_download: bool = True) -> str:

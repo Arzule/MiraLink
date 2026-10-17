@@ -12,9 +12,12 @@ import os
 import sys
 import threading
 import traceback
+
 from typing import Callable, Optional
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+from app_paths import data_dir
+
+LOG_DIR = os.path.join(data_dir(), "logs")  # junto al .exe en el ejecutable
 LOG_PATH = os.path.join(LOG_DIR, "miralink_debug.log")
 
 _configured = False
