@@ -283,6 +283,7 @@ class NativeCv2:
     soportado entrega `nearest[(ancho, alto)]` (o 640x480)."""
 
     CAP_DSHOW = 700
+    CAP_MSMF = 1400
     CAP_PROP_FRAME_WIDTH = 3
     CAP_PROP_FRAME_HEIGHT = 4
     CAP_PROP_FPS = 5
@@ -366,6 +367,19 @@ class TestNativeResolution(unittest.TestCase):
         self.assertEqual(cam.actual_size, (640, 480))
         self.assertEqual(cam.fourcc, "YUY2")
         self.assertIn("800x600 solo a 12.0 fps", cam.fallback_reason)
+
+    def test_exposure_limited_camera_keeps_1080p(self):
+        # TE-9072 del usuario (30/10): con exposición automática ~21 fps a cualquier tamaño (MJPG por MSMF)
+        cv2 = NativeCv2({(1920, 1080): 21.4, (1280, 960): 21.4, (1280, 720): 21.5, (800, 600): 21.5, (640, 480): 21.8})
+        cam = self.open(cv2)
+        self.assertEqual(cam.actual_size, (1920, 1080))
+        self.assertTrue(cam.exposure_limited)
+        self.assertEqual(cam.describe(), "1920x1080 MJPG (nativa)")
+        # 1080p lento, 640x480 de referencia y 1080p reabierto: sin probar los tamaños intermedios
+        self.assertEqual(cv2.requests, [(1920, 1080), (640, 480), (1920, 1080)])
+        cv2 = NativeCv2({(1920, 1080): 21.4, (640, 480): 21.8})
+        self.assertEqual(self.open(cv2).actual_size, (1920, 1080))
+        self.assertEqual(cv2.requests, [(1920, 1080)])  # la elección se recuerda
 
     def test_choice_is_cached_for_the_next_open(self):
         modes = {(1920, 1080): 15.0, (1280, 720): 30.0}

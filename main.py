@@ -312,11 +312,11 @@ def main(argv=None):
             return 2
         return run_record_session(resolution=resolution)
     if "--tracker-debug" in args:
-        from config_manager import camera_size, load_config
+        from config_manager import camera_exposure, camera_size, load_config
         from eye_tracker import run_tracker_debug
 
         config = load_config()
-        return run_tracker_debug(config["camera"]["device_index"], camera_size(config))
+        return run_tracker_debug(config["camera"]["device_index"], camera_size(config), camera_exposure(config))
     dry_run = "--dry-run" in args
     if "--config" in args:
         from PySide6.QtWidgets import QApplication

@@ -766,10 +766,11 @@ def default_camera_lister() -> List[int]:
     return list_cameras()
 
 
-def default_tracker_factory(camera_index: int, camera_size=None):
+def default_tracker_factory(camera_index: int, camera_size=None, camera_exposure: str = "auto"):
     from eye_tracker import TrackerThread
 
-    return TrackerThread(camera_index, camera_size=camera_size)  # None = resolución nativa
+    # camera_size None = resolución nativa; camera_exposure "auto" o "fast" (config.json camera.exposure)
+    return TrackerThread(camera_index, camera_size=camera_size, camera_exposure=camera_exposure)
 
 
 def camera_size_from_config(config: dict):
@@ -808,7 +809,11 @@ def camera_status_text(frame) -> str:
         return f"Cámara: {info} · midiendo fps…" if info else "Cámara: midiendo fps…"
     text = f"Cámara: {info} · {frame.fps:.0f} fps" if info else f"Cámara: {frame.fps:.0f} fps"
     if frame.fps < MIN_CAMERA_FPS:
-        text += f". Menos de {MIN_CAMERA_FPS:.0f} fps: la detección puede fallar; mejora la iluminación."
+        text += f". Menos de {MIN_CAMERA_FPS:.0f} fps: la detección puede fallar; mejora la iluminación"
+        if "exposición rápida" not in info:
+            # algunas cámaras alargan la exposición aunque haya luz (TE-9072: ~21 fps con el cuarto iluminado)
+            text += ' o pon "exposure": "fast" en la sección camera de config.json (imagen más oscura, 30 fps)'
+        text += "."
     return text
 
 
@@ -840,8 +845,11 @@ class CalibrationDialog(QDialog):
         self.config = config
         self.camera_lister = camera_lister
         if tracker_factory is default_tracker_factory:
+            from config_manager import camera_exposure
+
             size = camera_size_from_config(config)
-            tracker_factory = lambda i: default_tracker_factory(i, size)  # noqa: E731
+            exposure = camera_exposure(config)
+            tracker_factory = lambda i: default_tracker_factory(i, size, exposure)  # noqa: E731
         self.tracker_factory = tracker_factory
         self._last_camera_status = -1e9
         self.calibration_path = calibration_path or default_calibration_path()

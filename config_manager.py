@@ -16,7 +16,8 @@ DEFAULT_CONFIG = {
     "version": 1,
     # resolution "native": la mayor resolución que la cámara sostiene a ~30 fps (hasta 1920x1080);
     # "fixed": width x height (si no llega a ~24 fps se usa 640x480)
-    "camera": {"device_index": 0, "resolution": "native", "width": 640, "height": 480},
+    # exposure "auto": la de la cámara; "fast": exposición fija corta (~31 ms) para 30 fps, imagen más oscura
+    "camera": {"device_index": 0, "resolution": "native", "width": 640, "height": 480, "exposure": "auto"},
     "interaction": {
         "dwell_hold_ms": 1200,
         "blink_click_ms": 250,
@@ -71,6 +72,14 @@ def _clamp(value, min_val, max_val):
 
 
 CAMERA_RESOLUTION_MODES = ("native", "fixed")
+CAMERA_EXPOSURE_MODES = ("auto", "fast")  # como eye_tracker.CAMERA_EXPOSURES
+
+
+def camera_exposure(config) -> str:
+    """Exposición de la cámara de config.json (camera.exposure): "auto" o "fast"."""
+    cam = config.get("camera", {}) if isinstance(config, dict) else {}
+    value = cam.get("exposure", "auto") if isinstance(cam, dict) else "auto"
+    return value if value in CAMERA_EXPOSURE_MODES else "auto"
 
 
 def camera_size(config) -> Optional[Tuple[int, int]]:
@@ -98,6 +107,8 @@ def _validate_config(config):
     # resolución: nativa (por defecto) o fija width x height (si no la entrega a ~24 fps, eye_tracker cae a 640x480)
     if validated["camera"].get("resolution") not in CAMERA_RESOLUTION_MODES:
         validated["camera"]["resolution"] = DEFAULT_CONFIG["camera"]["resolution"]
+    if validated["camera"].get("exposure") not in CAMERA_EXPOSURE_MODES:
+        validated["camera"]["exposure"] = DEFAULT_CONFIG["camera"]["exposure"]
     for key, lo, hi in (("width", 160, 1920), ("height", 120, 1080)):
         try:
             validated["camera"][key] = _clamp(int(validated["camera"].get(key, DEFAULT_CONFIG["camera"][key])), lo, hi)

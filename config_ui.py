@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config_manager import camera_size, load_config, save_config, save_selected_eye
+from config_manager import camera_exposure, camera_size, load_config, save_config, save_selected_eye
 from theme_manager import list_themes, load_theme
 
 logger = logging.getLogger(__name__)
@@ -471,6 +471,7 @@ class ConfigWindow(QMainWindow):
             dry_run=self.dry_run,
             camera_index_getter=lambda: int(self._config.get("camera", {}).get("device_index", 0)),
             camera_size_getter=lambda: camera_size(self._config),
+            camera_exposure_getter=lambda: camera_exposure(self._config),
         )
 
     def _on_control_clicked(self):

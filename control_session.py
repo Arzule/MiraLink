@@ -84,6 +84,7 @@ class ControlSession(QObject):
         recenter_hotkey_factory: Optional[Callable[[Callable[[], None]], object]] = None,
         recenter_screen_factory: Optional[Callable[..., object]] = None,
         camera_size_getter: Callable[[], Optional[Tuple[int, int]]] = lambda: None,  # None = nativa
+        camera_exposure_getter: Callable[[], str] = lambda: "auto",  # config.json camera.exposure
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -98,6 +99,7 @@ class ControlSession(QObject):
         self.screen_size_fn = screen_size_fn
         self.clock = clock
         self.camera_size_getter = camera_size_getter
+        self.camera_exposure_getter = camera_exposure_getter
         # Ctrl+Alt+R real solo si el atajo de pausa también es el real (los tests nunca registran el real)
         if recenter_hotkey_factory is None and hotkey_factory is None:
             recenter_hotkey_factory = default_recenter_hotkey
@@ -203,9 +205,12 @@ class ControlSession(QObject):
                 from eye_tracker import TrackerThread
 
                 size = self.camera_size_getter()
+                exposure = self.camera_exposure_getter()
                 blink_model = getattr(mapper, "blink_model", None)  # EAR esperado según la altura de la mirada
                 eye = getattr(mapper, "eye", "both")  # los parpadeos se detectan con el ojo de la calibración
-                factory = lambda i: TrackerThread(i, camera_size=size, blink_model=blink_model, eye=eye)  # noqa: E731
+                factory = lambda i: TrackerThread(  # noqa: E731
+                    i, camera_size=size, blink_model=blink_model, eye=eye, camera_exposure=exposure
+                )
             self.tracker = factory(self.camera_index_getter())
             self.tracker.frame_ready.connect(self._on_frame)
             self.tracker.failed.connect(self._on_tracker_failed)

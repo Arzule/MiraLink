@@ -26,19 +26,27 @@ class FakeClock:
 
 
 class FakeCv2:
-    """Imita lo que usa CameraSource de cv2. `modes`: {(ancho, alto, mjpg): fps}."""
+    """Imita lo que usa CameraSource de cv2. `modes`: {(ancho, alto, mjpg): fps}.
+
+    `msmf_opens=False` simula un equipo sin Media Foundation (se usa DirectShow); `start_misses` son las
+    lecturas fallidas al arrancar cada captura (Media Foundation tarda en dar el primer cuadro)."""
 
     CAP_DSHOW = 700
+    CAP_MSMF = 1400
     CAP_PROP_FRAME_WIDTH = 3
     CAP_PROP_FRAME_HEIGHT = 4
     CAP_PROP_FPS = 5
     CAP_PROP_FOURCC = 6
+    CAP_PROP_EXPOSURE = 15
+    CAP_PROP_AUTO_EXPOSURE = 21
 
-    def __init__(self, modes, clock, opens=True, frames=True):
+    def __init__(self, modes, clock, opens=True, frames=True, msmf_opens=True, start_misses=0):
         self.modes = modes
         self.clock = clock
         self.opens = opens
         self.frames = frames
+        self.msmf_opens = msmf_opens
+        self.start_misses = start_misses
         self.captures = []
 
     @staticmethod
@@ -46,23 +54,29 @@ class FakeCv2:
         return sum(ord(c) << (8 * i) for i, c in enumerate(chars))
 
     def VideoCapture(self, index, api):  # noqa: N802
-        cap = FakeCap(self, index)
+        cap = FakeCap(self, index, api)
         self.captures.append(cap)
         return cap
 
 
 class FakeCap:
-    def __init__(self, cv2, index):
+    def __init__(self, cv2, index, api=FakeCv2.CAP_DSHOW):
         self.cv2 = cv2
         self.index = index
+        self.api = api
         self.props = {}
+        self.order = []  # propiedades en el orden en que se fijaron
         self.released = False
+        self.misses = cv2.start_misses
 
     def isOpened(self):  # noqa: N802
+        if self.api == FakeCv2.CAP_MSMF and not self.cv2.msmf_opens:
+            return False
         return self.cv2.opens
 
     def set(self, prop, value):
         self.props[prop] = value
+        self.order.append(prop)
         return True
 
     @property
@@ -84,6 +98,9 @@ class FakeCap:
 
     def read(self):
         if not self.cv2.frames:
+            return False, None
+        if self.misses > 0:
+            self.misses -= 1
             return False, None
         w, h, fps = self._mode()
         self.cv2.clock.t += 1.0 / fps
@@ -127,9 +144,59 @@ class TestCameraSource(unittest.TestCase):
         self.assertEqual(cam.actual_size, (640, 480))
         self.assertIn("12.0 fps", cam.fallback_reason)
         self.assertTrue(cv2.captures[0].released)
-        self.assertEqual(len(cv2.captures), 2)
-        self.assertNotIn(FakeCv2.CAP_PROP_FOURCC, cv2.captures[1].props)  # 640x480 sin MJPG
+        # 720p lento, 640x480 de referencia (30 fps: 720p no llega al 90 %) y 640x480 definitivo
+        self.assertEqual(len(cv2.captures), 3)
+        self.assertNotIn(FakeCv2.CAP_PROP_FOURCC, cv2.captures[2].props)  # 640x480 sin MJPG
+        self.assertFalse(cam.exposure_limited)
         self.assertIn("sin 1280x720", cam.describe())
+
+    def test_media_foundation_first_with_mjpg_after_the_size(self):
+        cam, cv2 = self.make({(640, 480, False): 30.0, (1280, 720, True): 30.0}, (1280, 720))
+        cam.open()
+        cap = cv2.captures[0]
+        self.assertEqual(cap.api, FakeCv2.CAP_MSMF)
+        self.assertEqual(cam.backend, "MSMF")
+        # MJPG DESPUÉS del tamaño (antes, la TE-9072 lo ignoraba)
+        self.assertLess(cap.order.index(FakeCv2.CAP_PROP_FRAME_HEIGHT), cap.order.index(FakeCv2.CAP_PROP_FOURCC))
+
+    def test_directshow_fallback_never_asks_for_mjpg(self):
+        # pedir MJPG con DirectShow colgó el driver de la TE-9072 hasta reconectarla
+        cam, cv2 = self.make({(640, 480, False): 30.0, (1280, 720, False): 30.0}, (1280, 720), msmf_opens=False)
+        cam.open()
+        self.assertEqual(cam.backend, "DSHOW")
+        self.assertEqual(cam.actual_size, (1280, 720))
+        for cap in cv2.captures:
+            self.assertNotIn(FakeCv2.CAP_PROP_FOURCC, cap.props)
+
+    def test_exposure_limited_size_is_kept(self):
+        # Como la TE-9072 con exposición automática: ~21 fps a 1280x720 MJPG y a 640x480
+        cam, cv2 = self.make({(640, 480, False): 22.0, (1280, 720, True): 21.0}, (1280, 720))
+        cam.open()
+        self.assertEqual(cam.actual_size, (1280, 720))
+        self.assertTrue(cam.exposure_limited)
+        self.assertEqual(cam.fallback_reason, "")
+        self.assertEqual(cam.describe(), "1280x720 MJPG")
+        self.assertFalse(cv2.captures[-1].released)  # la captura en uso es la de 720p reabierta
+
+    def test_exposure_modes(self):
+        cam, cv2 = self.make({(640, 480, False): 30.0})
+        cam.open()
+        self.assertEqual(cv2.captures[0].props[FakeCv2.CAP_PROP_AUTO_EXPOSURE], 0.75)  # automática explícita
+        self.assertNotIn(FakeCv2.CAP_PROP_EXPOSURE, cv2.captures[0].props)
+        clock = FakeClock()
+        cv2 = FakeCv2({(640, 480, False): 30.0}, clock)
+        cam = CameraSource(0, 640, 480, cv2_module=cv2, clock=clock, exposure="fast")
+        cam.open()
+        self.assertEqual(cv2.captures[0].props[FakeCv2.CAP_PROP_AUTO_EXPOSURE], 0.25)
+        self.assertEqual(cv2.captures[0].props[FakeCv2.CAP_PROP_EXPOSURE], et.EXPOSURE_FAST)
+        self.assertEqual(cam.describe(), "640x480 YUY2, exposición rápida")
+        with self.assertRaises(ValueError):
+            CameraSource(0, exposure="lenta")
+
+    def test_tolerates_failed_reads_while_starting(self):
+        cam, _ = self.make({(640, 480, False): 30.0}, start_misses=et.MAX_START_MISSES)
+        cam.open()
+        self.assertEqual(cam.actual_size, (640, 480))
 
     def test_accepts_delivered_size_when_fps_are_enough(self):
         # La cámara no da 1280x720 y entrega otro tamaño a 30 fps: se acepta (antes se descartaba sin medir)
@@ -149,6 +216,8 @@ class TestCameraSource(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             cam.open()
         self.assertIn("no entrega imagen", str(ctx.exception))
+        # la causa del 30/10: la app Cámara de Windows tenía la cámara (Media Foundation abría sin cuadros)
+        self.assertIn("app Cámara", str(ctx.exception))
         self.assertTrue(cv2.captures[-1].released)
 
     def test_fps_measured_with_median_interval(self):
@@ -200,7 +269,8 @@ class TestFpsMeter(unittest.TestCase):
 class TestCameraConfig(unittest.TestCase):
     def test_defaults_and_clamps(self):
         self.assertEqual(
-            DEFAULT_CONFIG["camera"], {"device_index": 0, "resolution": "native", "width": 640, "height": 480}
+            DEFAULT_CONFIG["camera"],
+            {"device_index": 0, "resolution": "native", "width": 640, "height": 480, "exposure": "auto"},
         )
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "config.json")
@@ -221,7 +291,23 @@ class TestCameraConfig(unittest.TestCase):
         cam = t._camera_factory(0)
         self.assertIsInstance(cam, CameraSource)
         self.assertEqual((cam.width, cam.height), (1280, 720))
+        self.assertEqual(cam.exposure, "auto")
         self.assertIsNone(cam._cap)  # solo se construyó: no se abrió
+        fast = et.TrackerThread(0, camera_size=None, camera_exposure="fast")._camera_factory(0)
+        self.assertEqual(fast.exposure, "fast")
+        self.assertIsNone(fast._cap)
+
+    def test_exposure_config(self):
+        from config_manager import camera_exposure
+
+        self.assertEqual(camera_exposure(DEFAULT_CONFIG), "auto")
+        self.assertEqual(camera_exposure({"camera": {"exposure": "fast"}}), "fast")
+        self.assertEqual(camera_exposure({"camera": {"exposure": "x"}}), "auto")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"camera": {"exposure": "lenta"}}, f)
+            self.assertEqual(load_config(path)["camera"]["exposure"], "auto")
 
     def test_parse_resolution(self):
         import main
@@ -250,6 +336,10 @@ class TestCameraStatusInUi(unittest.TestCase):
         self.assertIn("1280x720", slow)
         self.assertIn("Menos de 25 fps", slow)
         self.assertIn("midiendo", cui.camera_status_text(TrackingFrame(timestamp=0, image=img)))
+        self.assertIn('"exposure": "fast"', slow)  # con exposición automática se sugiere la rápida
+        fast = cui.camera_status_text(TrackingFrame(timestamp=0, image=img, fps=14.2,
+                                                    camera_info="1280x720 MJPG, exposición rápida"))
+        self.assertNotIn('"exposure": "fast"', fast)
 
     def test_modal_shows_camera_status_and_uses_configured_size(self):
         import calibration_ui as cui

@@ -363,12 +363,28 @@ class BlinkDetector:
 # ------------------------------------------------------------- hardware
 FALLBACK_SIZE = (640, 480)
 MIN_CAMERA_FPS = 25.0  # por debajo la detección ocular se degrada (hallazgo de la prueba manual)
-MIN_PROBE_FPS = 24.0  # un modo que no llega a esto al abrir se descarta
+MIN_PROBE_FPS = 24.0  # un modo que no llega a esto al abrir se descarta (salvo NATIVE_RELATIVE_FPS)
+# Si un tamaño mayor da al menos este 90 % de los fps de 640x480 con la misma cámara y la misma luz, se usa
+# aunque no llegue a MIN_PROBE_FPS: lo que limita es la exposición, no la resolución, y bajar no gana nada
+# (TE-9072 del usuario, 30/10: exposición automática ~21 fps tanto a 1080p MJPG como a 480p).
+NATIVE_RELATIVE_FPS = 0.9
 # Resolución nativa: se piden estos tamaños de mayor a menor (con MJPG) y se queda el mayor que la cámara
 # entrega a >= MIN_PROBE_FPS. Tope 1920x1080: más píxeles cuestan CPU (decodificar y MediaPipe) y el
 # modelo de landmarks trabaja con un recorte de 256x256 de la cara, así que la ganancia se agota antes.
 NATIVE_CANDIDATES = ((1920, 1080), (1280, 960), (1280, 720), (800, 600), FALLBACK_SIZE)
-_NATIVE_CACHE: dict = {}  # índice de cámara -> tamaño elegido (las aperturas siguientes no repiten la búsqueda)
+# (índice, exposición) -> (tamaño elegido, fps de 640x480 si se eligió por NATIVE_RELATIVE_FPS o None):
+# las aperturas siguientes no repiten la búsqueda ni la medición de referencia
+_NATIVE_CACHE: dict = {}
+# Exposición: "auto" (la de la cámara) o "fast": EXPOSURE_FAST (log2 de segundos en Media Foundation:
+# -5 = 1/32 s), la más larga que permite 30 fps. Con la TE-9072: 31 fps frente a ~21-25 en automática, sin
+# diferencia medible en el ruido del iris, pero la imagen queda muy oscura (brillo ~25/255).
+CAMERA_EXPOSURES = ("auto", "fast")
+EXPOSURE_FAST = -5.0
+MAX_START_MISSES = 10  # lecturas fallidas toleradas al arrancar (Media Foundation puede tardar en dar el primer cuadro)
+CAMERA_BUSY_HINT = "Cierra la app Cámara u otras aplicaciones que la estén usando."
+
+# Media Foundation: tarda menos en abrir sin las transformaciones por hardware
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
 
 
 def _fourcc_text(value) -> str:
@@ -388,16 +404,21 @@ def _area(size) -> int:
 
 
 class CameraSource:
-    """Captura de cámara con cv2.VideoCapture (DirectShow) a 30 fps.
+    """Captura de cámara con cv2.VideoCapture a 30 fps: Media Foundation y, si no abre, DirectShow.
 
+    - Backend (diagnóstico con la TE-9072 del usuario, 30/10): con DirectShow la cámara ignora el pedido
+      de MJPG y entrega YUY2 sin comprimir (1080p a 2.2 fps); pedir MJPG antes del tamaño a 720p llegó a
+      colgar el driver hasta reconectarla. Con Media Foundation y MJPG pedido DESPUÉS del tamaño entrega
+      1080p a la misma tasa que 480p. Por eso: Media Foundation (MJPG tras el tamaño) y DirectShow solo de
+      respaldo y nunca con MJPG.
     - Resolución nativa (`width`/`height` = None, lo que usa la aplicación por defecto): prueba
-      NATIVE_CANDIDATES de mayor a menor con MJPG, midiendo los fps con el reloj en `probe_frames`
-      cuadros, y se queda con el mayor tamaño ENTREGADO que sostiene MIN_PROBE_FPS (la cámara puede
-      entregar otro tamaño que el pedido, p. ej. 1280x960 al pedir 1920x1080). Si ninguno llega, usa
-      640x480 sin MJPG. El resultado se recuerda por índice durante la ejecución.
-    - Tamaño fijo: 640x480 sin MJPG; otro tamaño con MJPG (muchas webcams solo dan 30 fps a 720p
-      comprimiendo) y se acepta lo que entregue la cámara si sostiene MIN_PROBE_FPS; si no, vuelve a
-      640x480 sin MJPG y lo anota en `fallback_reason`.
+      NATIVE_CANDIDATES de mayor a menor, midiendo los fps con el reloj en `probe_frames` cuadros, y se
+      queda con el mayor tamaño ENTREGADO que sostiene MIN_PROBE_FPS o, si ninguno llega, el mayor que da
+      NATIVE_RELATIVE_FPS de los fps de 640x480 (la exposición limita igual). Si no, 640x480 sin MJPG. La
+      elección se recuerda por índice y exposición durante la ejecución.
+    - Tamaño fijo: 640x480 sin MJPG; otro tamaño con MJPG y se acepta lo que entregue la cámara si sostiene
+      MIN_PROBE_FPS (o NATIVE_RELATIVE_FPS de 640x480); si no, vuelve a 640x480 y lo anota en `fallback_reason`.
+    - `exposure`: "auto" o "fast" (EXPOSURE_FAST, ver CAMERA_EXPOSURES).
     `cv2_module` y `clock` se inyectan en los tests (nunca se abre la cámara real en ellos).
     """
 
@@ -411,12 +432,16 @@ class CameraSource:
         clock: Callable[[], float] = time.monotonic,
         probe_frames: int = 12,
         use_cache: bool = True,
+        exposure: str = "auto",
     ):
+        if exposure not in CAMERA_EXPOSURES:
+            raise ValueError(f"exposición desconocida: {exposure}")
         self.index = index
         self.native = width is None or height is None
         self.width = None if self.native else int(width)
         self.height = None if self.native else int(height)
         self.fps = fps
+        self.exposure = exposure
         self._cv2 = cv2_module
         self._clock = clock
         self.probe_frames = max(3, int(probe_frames))
@@ -424,28 +449,52 @@ class CameraSource:
         self._cap = None
         self.actual_size: Optional[Tuple[int, int]] = None
         self.fourcc = ""
+        self.backend = ""
         self.measured_fps = 0.0
         self.fallback_reason = ""
+        self.exposure_limited = False  # se aceptó un tamaño por NATIVE_RELATIVE_FPS
+        self._reference_fps: Optional[float] = None
+
+    @staticmethod
+    def _apis(cv2):
+        """(nombre, API) en orden de preferencia; un cv2 sin Media Foundation solo usa DirectShow."""
+        apis = []
+        if hasattr(cv2, "CAP_MSMF"):
+            apis.append(("MSMF", cv2.CAP_MSMF))
+        apis.append(("DSHOW", cv2.CAP_DSHOW))
+        return apis
 
     def _open_capture(self, cv2, size: Tuple[int, int], mjpg: bool):
-        cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            cap.release()
-            return None
-        if mjpg:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # antes del tamaño
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
-        cap.set(cv2.CAP_PROP_FPS, self.fps)
-        return cap
+        for name, api in self._apis(cv2):
+            cap = cv2.VideoCapture(self.index, api)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+            if mjpg and name != "DSHOW":  # después del tamaño; con DirectShow nunca (ver docstring)
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            if hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+                if self.exposure == "fast":
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # manual (convención de OpenCV)
+                    cap.set(cv2.CAP_PROP_EXPOSURE, EXPOSURE_FAST)
+                else:
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # automática (la cámara puede recordar la manual)
+            self.backend = name
+            return cap
+        return None
 
     def _probe(self, cap) -> Tuple[bool, Optional[Tuple[int, int]], float]:
         """Lee unos cuadros: (ok, tamaño entregado, fps medidos con la mediana de los intervalos)."""
-        times, size = [], None
-        for _ in range(self.probe_frames):
+        times, size, misses = [], None, 0
+        while len(times) < self.probe_frames:
             ok, frame = cap.read()
             if not ok or frame is None:
-                return False, size, 0.0
+                misses += 1
+                if misses > MAX_START_MISSES:
+                    return False, size, 0.0
+                continue
             size = (int(frame.shape[1]), int(frame.shape[0]))
             times.append(self._clock())
         gaps = np.diff(times[1:])  # el primer cuadro suele tardar más (exposición automática)
@@ -464,8 +513,42 @@ class CameraSource:
     def _open_fallback(self, cv2):
         cap, ok, size, fps = self._try(cv2, FALLBACK_SIZE)
         if cap is None:
-            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. Revisa que no esté en uso por otra aplicación.")
+            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. {CAMERA_BUSY_HINT}")
         return cap, ok, size, fps
+
+    def _reference(self, cv2) -> float:
+        """fps a 640x480 sin MJPG con la misma luz (se abre y se cierra; se mide una vez por apertura)."""
+        if self._reference_fps is None:
+            cap, ok, _size, fps = self._try(cv2, FALLBACK_SIZE)
+            if cap is not None:
+                cap.release()
+            self._reference_fps = fps if ok else 0.0
+        return self._reference_fps
+
+    def _relative_known_ok(self, delivered, fps: float) -> bool:
+        """Con la referencia de 640x480 ya medida (o recordada), ¿se acepta este tamaño sin reabrir?"""
+        ref = self._reference_fps
+        return bool(
+            ref and delivered is not None and _area(delivered) > _area(FALLBACK_SIZE) and fps >= NATIVE_RELATIVE_FPS * ref
+        )
+
+    def _relative_retry(self, cv2, size: Tuple[int, int], delivered, fps: float):
+        """Un tamaño mayor que 640x480 que no llega a MIN_PROBE_FPS se acepta si da NATIVE_RELATIVE_FPS de
+        los fps de 640x480: se reabre (la cámara ya se cerró) y se comprueba. Devuelve el resultado o None."""
+        if delivered is None or _area(delivered) <= _area(FALLBACK_SIZE) or fps <= 0:
+            return None
+        ref = self._reference(cv2)
+        if ref <= 0 or fps < NATIVE_RELATIVE_FPS * ref:
+            return None
+        cap, ok, again, fps2 = self._try(cv2, size)
+        if cap is not None and ok and tuple(again) == tuple(delivered) and fps2 >= NATIVE_RELATIVE_FPS * ref:
+            self.exposure_limited = True
+            logger.info("Cámara %s: %dx%d a %.1f fps (640x480: %.1f): limita la exposición, no la resolución",
+                        self.index, again[0], again[1], fps2, ref)
+            return cap, ok, again, fps2
+        if cap is not None:
+            cap.release()
+        return None
 
     def _open_fixed(self, cv2):
         requested = (self.width, self.height)
@@ -473,23 +556,29 @@ class CameraSource:
             return self._open_fallback(cv2)
         cap, ok, size, fps = self._try(cv2, requested)
         if cap is None:
-            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. Revisa que no esté en uso por otra aplicación.")
+            raise RuntimeError(f"No se pudo abrir la cámara {self.index}. {CAMERA_BUSY_HINT}")
         if ok and fps >= MIN_PROBE_FPS:
             return cap, ok, size, fps  # se acepta el tamaño entregado aunque no sea el pedido
+        cap.release()
+        if ok:
+            retried = self._relative_retry(cv2, requested, size, fps)
+            if retried is not None:
+                return retried
         if not ok:
             reason = f"la cámara no entregó imagen a {requested[0]}x{requested[1]}"
         else:
             reason = f"{size[0]}x{size[1]} solo a {fps:.1f} fps"
         logger.warning("Cámara %s: %s; se usa %dx%d", self.index, reason, *FALLBACK_SIZE)
-        cap.release()
         self.fallback_reason = reason
         return self._open_fallback(cv2)
 
     def _open_native(self, cv2):
         """Busca el mayor tamaño entregado que sostiene MIN_PROBE_FPS (ver docstring de la clase)."""
         candidates = list(NATIVE_CANDIDATES)
-        cached = _NATIVE_CACHE.get(self.index) if self.use_cache else None
+        key = (self.index, self.exposure)
+        cached = _NATIVE_CACHE.get(key) if self.use_cache else None
         if cached is not None:
+            cached, self._reference_fps = cached
             candidates = [cached] + [c for c in candidates if _area(c) < _area(cached)]
         best = None  # (tamaño pedido, tamaño entregado, fps)
         best_cap = None
@@ -504,14 +593,12 @@ class CameraSource:
             if failed_area is not None and _area(size) >= failed_area:
                 continue  # la cámara volvería a entregar un modo demasiado lento
             if best_cap is not None:
-                best_cap.release()  # DirectShow no abre la misma cámara dos veces a la vez
+                best_cap.release()  # la misma cámara no se abre dos veces a la vez
                 best_cap = None
             cap, ok, delivered, fps = self._try(cv2, size)
             if cap is None:
                 if not opened_any:
-                    raise RuntimeError(
-                        f"No se pudo abrir la cámara {self.index}. Revisa que no esté en uso por otra aplicación."
-                    )
+                    raise RuntimeError(f"No se pudo abrir la cámara {self.index}. {CAMERA_BUSY_HINT}")
                 continue
             opened_any = True
             if ok and fps >= MIN_PROBE_FPS and (best is None or _area(delivered) > _area(best[1])):
@@ -519,7 +606,17 @@ class CameraSource:
                 if tuple(delivered) == tuple(size):
                     break  # la cámara dio exactamente lo pedido: es el mayor que queda
                 continue
+            if ok and best is None and self._relative_known_ok(delivered, fps):
+                self.exposure_limited = True  # referencia recordada: sin volver a medir 640x480 ni reabrir
+                best, best_cap = (tuple(size), tuple(delivered), fps), cap
+                break
             cap.release()
+            if ok and best is None:
+                retried = self._relative_retry(cv2, size, delivered, fps)
+                if retried is not None:
+                    best_cap, _ok, delivered, fps = retried
+                    best = (tuple(size), tuple(delivered), fps)
+                    break  # con la exposición como límite, los tamaños menores no darían más fps
             if not ok:
                 notes.append(f"sin imagen a {size[0]}x{size[1]}")
                 failed_area = _area(size) if failed_area is None else min(failed_area, _area(size))
@@ -540,14 +637,14 @@ class CameraSource:
                 result = (best_cap, True, best[1], best[2])
             if result is not None:
                 if self.use_cache:
-                    _NATIVE_CACHE[self.index] = best[0]
-                self.fallback_reason = "; ".join(notes)
+                    _NATIVE_CACHE[key] = (best[0], self._reference_fps if self.exposure_limited else None)
+                self.fallback_reason = "" if self.exposure_limited else "; ".join(notes)
                 return result
         reason = "; ".join(notes) or "ningún modo mayor sostiene 24 fps"
         logger.warning("Cámara %s: resolución nativa: %s; se usa %dx%d", self.index, reason, *FALLBACK_SIZE)
         self.fallback_reason = reason
         if self.use_cache:
-            _NATIVE_CACHE[self.index] = FALLBACK_SIZE
+            _NATIVE_CACHE[key] = (FALLBACK_SIZE, None)
         return self._open_fallback(cv2)
 
     def open(self):
@@ -557,17 +654,19 @@ class CameraSource:
             self._cv2 = cv2
         cv2 = self._cv2
         self.fallback_reason = ""
+        self.exposure_limited = False
+        self._reference_fps = None
         cap, ok, size, fps = self._open_native(cv2) if self.native else self._open_fixed(cv2)
         if not ok:
             cap.release()
-            raise RuntimeError(f"La cámara {self.index} se abrió pero no entrega imagen.")
+            raise RuntimeError(f"La cámara {self.index} se abrió pero no entrega imagen. {CAMERA_BUSY_HINT}")
         self.actual_size, self.measured_fps = size, fps
         self.fourcc = _fourcc_text(cap.get(cv2.CAP_PROP_FOURCC))
         self._cap = cap
         logger.info(
-            "Cámara %s: %dx%d %s a %.1f fps medidos (%s)",
-            self.index, size[0], size[1], self.fourcc or "?", fps,
-            "resolución nativa" if self.native else f"pedido {self.width}x{self.height}",
+            "Cámara %s: %dx%d %s a %.1f fps medidos (%s, %s, exposición %s)",
+            self.index, size[0], size[1], self.fourcc or "?", fps, self.backend,
+            "resolución nativa" if self.native else f"pedido {self.width}x{self.height}", self.exposure,
         )
 
     def describe(self) -> str:
@@ -584,6 +683,8 @@ class CameraSource:
             text += f" (sin {self.width}x{self.height}: {self.fallback_reason})"
         elif self.actual_size != (self.width, self.height):
             text += f" (pedido {self.width}x{self.height})"
+        if self.exposure == "fast":
+            text += ", exposición rápida"
         return text
 
     def read(self):
@@ -773,6 +874,7 @@ def _make_tracker_thread_class():
             camera_size: Optional[Tuple[int, int]] = FALLBACK_SIZE,
             blink_model=None,
             eye: str = "both",
+            camera_exposure: str = "auto",
         ):
             super().__init__(parent)
             self.camera_index = camera_index
@@ -781,7 +883,7 @@ def _make_tracker_thread_class():
             self.eye = eye  # ojo de la calibración: su EAR decide los parpadeos
             # camera_size None = resolución nativa (CameraSource elige la mayor que sostiene ~30 fps)
             w, h = (None, None) if camera_size is None else (int(camera_size[0]), int(camera_size[1]))
-            self._camera_factory = camera_factory or (lambda i: CameraSource(i, w, h))
+            self._camera_factory = camera_factory or (lambda i: CameraSource(i, w, h, exposure=camera_exposure))
             self._tracker_factory = tracker_factory or FaceTracker
             self._clock = clock
             self._stop_requested = False
@@ -875,7 +977,9 @@ def draw_debug_overlay(image: np.ndarray, frame: TrackingFrame, blink_durations_
     return out
 
 
-def run_tracker_debug(camera_index: int = 0, camera_size: Optional[Tuple[int, int]] = None) -> int:
+def run_tracker_debug(
+    camera_index: int = 0, camera_size: Optional[Tuple[int, int]] = None, camera_exposure: str = "auto"
+) -> int:
     """Ventana de OpenCV con la cámara y el seguimiento. Prueba manual de la etapa 2."""
     import cv2
 
@@ -884,7 +988,8 @@ def run_tracker_debug(camera_index: int = 0, camera_size: Optional[Tuple[int, in
     except ModelNotFoundError as e:
         print(e)
         return 1
-    camera = CameraSource(camera_index, *((None, None) if camera_size is None else camera_size))
+    size = (None, None) if camera_size is None else camera_size
+    camera = CameraSource(camera_index, *size, exposure=camera_exposure)
     try:
         camera.open()
     except RuntimeError as e:
