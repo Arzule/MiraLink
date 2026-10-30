@@ -40,6 +40,16 @@ DEFAULT_FIT = {
     "auto_offset": True,  # corrige el sesgo común con los 5 puntos de validación si mejora el error (LOO)
 }
 
+# Ojo con el que se calcula la mirada y se detectan los parpadeos (config.json tracking.eye).
+# "auto": en cada calibración se ajusta con cada ojo y con los dos, y se elige el de MENOR TEMBLOR entre
+# los que tienen un error parecido al mejor (choose_eye). El margen de error evita elegir un ojo que no
+# sigue los puntos (p. ej. un ojo no funcional: su iris apenas se mueve, tiembla poco y apunta mal).
+EYES = ("both", "right", "left")
+EYE_MODES = ("auto",) + EYES
+EYE_COLUMNS = {"right": (0, 1), "left": (2, 3)}  # (along, perp) en FEATURE_NAMES; ojos del sujeto
+EYE_ERROR_TOLERANCE = 0.15  # candidatos: error <= mejor x (1 + 0.15) + EYE_ERROR_MARGIN_PX
+EYE_ERROR_MARGIN_PX = 10.0
+
 # Pose de la cabeza vigilada para el aviso de deriva: nose_x, nose_y, yaw, pitch (índices de FEATURE_NAMES)
 POSE_COLS = (4, 5, 7, 8)
 POSE_NAMES = ("posición horizontal", "posición vertical", "giro", "inclinación")
@@ -64,17 +74,27 @@ def pad_features(x: np.ndarray) -> np.ndarray:
     return x
 
 
-def reduce_features(x: np.ndarray, feature_set: str = "compact") -> np.ndarray:
+def eye_iris(x: np.ndarray, eye: str = "both") -> Tuple[np.ndarray, np.ndarray]:
+    """(along, perp) del iris por muestra: la media de los dos ojos ("both") o la de un ojo."""
+    x = np.atleast_2d(np.asarray(x, dtype=float))
+    if eye == "both":
+        return (x[:, 0] + x[:, 2]) / 2.0, (x[:, 1] + x[:, 3]) / 2.0
+    if eye not in EYE_COLUMNS:
+        raise ValueError(f"ojo desconocido: {eye}")
+    a, p = EYE_COLUMNS[eye]
+    return x[:, a], x[:, p]
+
+
+def reduce_features(x: np.ndarray, feature_set: str = "compact", eye: str = "both") -> np.ndarray:
     """Reduce el vector de rasgos de eye_tracker (FEATURE_NAMES) al conjunto pedido.
 
-    eyes (2): [iris_along_medio, iris_perp_medio]
+    eyes (2): [iris_along, iris_perp] del ojo `eye` (media de los dos con "both")
     compact (6): + [nose_x, nose_y, yaw, pitch]
     head (8): compact + [roll, interocular] (compensación completa de la cabeza: giro, posición y escala)
-    full (10): los 10 rasgos sin promediar los ojos.
+    full (10): los 10 rasgos sin promediar los ojos (ignora `eye`).
     """
     x = pad_features(x)
-    along = (x[:, 0] + x[:, 2]) / 2.0
-    perp = (x[:, 1] + x[:, 3]) / 2.0
+    along, perp = eye_iris(x, eye)
     if feature_set == "eyes":
         return np.column_stack([along, perp])
     if feature_set == "compact":
@@ -170,10 +190,9 @@ def filter_point_samples(
 BLINK_CLOSE_RATIO = 0.6  # como BlinkDetector: cerrado si EAR < 0.6 x apertura de referencia
 
 
-def iris_height(x: np.ndarray) -> np.ndarray:
-    """Altura del iris en el ojo por muestra (media de los dos iris_perp; positivo = abajo)."""
-    x = np.atleast_2d(np.asarray(x, dtype=float))
-    return (x[:, 1] + x[:, 3]) / 2.0
+def iris_height(x: np.ndarray, eye: str = "both") -> np.ndarray:
+    """Altura del iris en el ojo por muestra (iris_perp del ojo o media de los dos; positivo = abajo)."""
+    return eye_iris(x, eye)[1]
 
 
 def local_open_mask(
@@ -283,6 +302,7 @@ class GazeMapper:
     """Regresión ridge sobre rasgos normalizados (solo numpy).
 
     - feature_set: eyes / compact / head / full (reduce_features).
+    - eye: both / right / left, el iris que se usa (EYES; lo elige fit_session según tracking.eye).
     - model: linear / quad / quad_reduced (_design).
     - alpha: penalización relativa al número de muestras, o "cv" para elegirla de ALPHA_GRID con
       validación cruzada dejando un punto fuera.
@@ -301,6 +321,7 @@ class GazeMapper:
         aggregate: str = "samples",
         clamp: bool = True,
         auto_offset: bool = False,
+        eye: str = "both",
     ):
         if feature_set not in FEATURE_SETS:
             raise ValueError(f"feature_set desconocido: {feature_set}")
@@ -308,7 +329,10 @@ class GazeMapper:
             raise ValueError(f"modelo desconocido: {model}")
         if aggregate not in AGGREGATES:
             raise ValueError(f"agregación desconocida: {aggregate}")
+        if eye not in EYES:
+            raise ValueError(f"ojo desconocido: {eye}")
         self.feature_set = feature_set
+        self.eye = eye
         self.model = model
         self.aggregate = aggregate
         self.alpha_mode = "cv" if alpha == "cv" else "fixed"
@@ -336,6 +360,7 @@ class GazeMapper:
             model=opts["model"],
             aggregate=opts["aggregate"],
             auto_offset=bool(opts.get("auto_offset", False)),
+            eye=opts.get("eye", "both"),
         )
 
     @property
@@ -394,7 +419,7 @@ class GazeMapper:
             groups = np.asarray(groups)
             if self.aggregate == "median":
                 x, y, groups = aggregate_point_samples(x, y, groups)
-        r = reduce_features(x, self.feature_set)
+        r = reduce_features(x, self.feature_set, self.eye)
         uniq = np.unique(groups) if groups is not None else np.array([])
         cv_by_alpha = {}
         if groups is not None and len(uniq) >= 3:
@@ -477,7 +502,7 @@ class GazeMapper:
         """Devuelve (n, 2) en píxeles físicos (sin recortar a la pantalla)."""
         if not self.is_fitted:
             raise RuntimeError("El mapper no está ajustado")
-        z = (reduce_features(x, self.feature_set) - self.mean) / self.scale
+        z = (reduce_features(x, self.feature_set, self.eye) - self.mean) / self.scale
         out = _design(self._bounded(z, self.z_min, self.z_max), self.model) @ self.weights
         return out + self.offset if apply_offset else out
 
@@ -523,6 +548,7 @@ class GazeMapper:
             "camera_index": int(camera_index),
             "screen": {k: int(geometry[k]) for k in ("x", "y", "width", "height")},
             "feature_set": self.feature_set,
+            "eye": self.eye,
             "model": self.model,
             "aggregate": self.aggregate,
             "alpha": self.alpha,
@@ -554,12 +580,16 @@ class GazeMapper:
                             "La geometría de pantalla cambió desde la calibración "
                             f"({saved['width']}x{saved['height']} -> {geometry['width']}x{geometry['height']})"
                         )
+            eye = data.get("eye", "both")  # las calibraciones anteriores usaban siempre los dos ojos
+            if eye not in EYES:
+                raise CalibrationError(f"calibration.json inválido: ojo desconocido ({eye}); calibra de nuevo")
             mapper = cls(
                 data["feature_set"],
                 float(data["alpha"]),
                 float(data.get("scale_floor", 0.02)),
                 model=data.get("model", "quad"),
                 aggregate=data.get("aggregate", "samples"),
+                eye=eye,
             )
             mapper.alpha_mode = data.get("alpha_mode", "fixed")
             mapper.mean = np.asarray(data["mean"], dtype=float)
@@ -641,6 +671,40 @@ def save_offset(path: str, offset: Tuple[float, float]) -> None:
     _write_json_atomic(path, data)
 
 
+# ------------------------------------------------------------- elección del ojo
+def prediction_jitter_px(mapper: GazeMapper, x: np.ndarray, groups: np.ndarray) -> float:
+    """Temblor de la estimación con este ajuste: por punto, dispersión 2D (raíz del error cuadrático
+    medio a la media) de las predicciones SIN filtrar; mediana de los puntos con >= 3 muestras. Mide
+    cuánto ruido del iris llega al cursor antes del One Euro."""
+    x = pad_features(x)
+    groups = np.asarray(groups)
+    pred = mapper.predict(x, apply_offset=False)
+    spreads = []
+    for g in np.unique(groups):
+        p = pred[groups == g]
+        if len(p) >= 3:
+            spreads.append(float(np.sqrt(np.mean(np.sum((p - p.mean(axis=0)) ** 2, axis=1)))))
+    return float(np.median(spreads)) if spreads else float("nan")
+
+
+def choose_eye(candidates: Dict[str, Dict[str, float]]) -> str:
+    """Elige el ojo de MENOR temblor entre los de error parecido al mejor.
+
+    `candidates`: ojo -> {"error_px", "jitter_px"}. Candidatos: error <= mejor x (1 + EYE_ERROR_TOLERANCE)
+    + EYE_ERROR_MARGIN_PX; en empate de temblor gana el orden de EYES (both primero). Sin datos: "both".
+    """
+    finite = {
+        e: c for e, c in candidates.items()
+        if e in EYES and np.isfinite(c.get("error_px", np.nan)) and np.isfinite(c.get("jitter_px", np.nan))
+    }
+    if not finite:
+        return "both"
+    best = min(c["error_px"] for c in finite.values())
+    limit = best * (1.0 + EYE_ERROR_TOLERANCE) + EYE_ERROR_MARGIN_PX
+    ok = [e for e in EYES if e in finite and finite[e]["error_px"] <= limit]
+    return min(ok, key=lambda e: (finite[e]["jitter_px"], EYES.index(e)))
+
+
 # ---------------------------------------------------------------- sesión
 PHASE_SETTLING = "settling"
 PHASE_CAPTURING = "capturing"
@@ -652,15 +716,86 @@ STAGE_VALIDATION = "validation"
 STAGE_HEAD = "head"
 
 # Fase de movimiento de cabeza (solo en --record-session, para medir sin riesgo antes de compensar la
-# cabeza): se mira el punto central mientras la cabeza se mueve como indica cada paso.
-# (clave, instrucción, segundos de movimiento); antes de cada paso hay HEAD_SETTLE_S para leerla.
+# cabeza): se mira el punto central con la cabeza QUIETA en poses pequeñas. (clave, instrucción, segundos
+# quieto); antes de cada paso hay HEAD_SETTLE_S para leer la instrucción y colocarse.
+# Sesiones reales del 17/10: con movimientos continuos y grandes (56-62° de giro) se mezclaba el retraso
+# con la geometría y se perdía la cara; por eso poses quietas de ~10° (HEAD_POSE_TARGETS).
 HEAD_MOTION_STEPS = (
-    ("still", "Mira el punto sin mover la cabeza.", 3.0),
-    ("yaw", "Sin dejar de mirar el punto, gira la cabeza despacio a la izquierda y a la derecha.", 6.0),
-    ("pitch", "Sin dejar de mirar el punto, sube y baja la barbilla despacio.", 6.0),
-    ("depth", "Sin dejar de mirar el punto, acércate y aléjate de la pantalla despacio.", 6.0),
+    ("still", "Mira el punto sin mover la cabeza.", 2.5),
+    ("left", "Gira la cabeza un poco hacia tu izquierda y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("right", "Gira la cabeza un poco hacia tu derecha y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("up", "Sube un poco la barbilla y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("down", "Baja un poco la barbilla y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("near", "Acércate un poco a la pantalla y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("far", "Aléjate un poco de la pantalla y quédate quieto, sin dejar de mirar el punto.", 2.5),
 )
 HEAD_SETTLE_S = 2.0
+# Eje que mide cada paso y zona objetivo del indicador en vivo (grados de giro/inclinación respecto al
+# paso "quieto"; distancia en % de cambio de la separación de los ojos en la imagen)
+HEAD_STEP_AXIS = {"left": "yaw", "right": "yaw", "up": "pitch", "down": "pitch", "near": "depth", "far": "depth"}
+HEAD_POSE_TARGETS = {"yaw": (8.0, 12.0), "pitch": (8.0, 12.0), "depth": (10.0, 20.0)}
+
+
+class HeadPoseGuide:
+    """Indicador en vivo de la fase de cabeza: cuánto se movió la cabeza respecto al paso "quieto".
+
+    La referencia es la mediana de yaw, pitch e interocular durante la captura del paso "still" (si aún no
+    hay, la de los primeros cuadros con rostro). `update` devuelve, en los pasos con eje, el valor actual
+    (mediana de los últimos `window` cuadros: grados de |Δyaw| o |Δpitch|, o % de |Δdistancia|), la zona
+    objetivo y si está dentro; None en el paso quieto o sin rostro. Solo guía: no cambia el ritmo.
+    """
+
+    def __init__(self, targets: Optional[Dict[str, Tuple[float, float]]] = None, window: int = 5):
+        self.targets = dict(HEAD_POSE_TARGETS if targets is None else targets)
+        self.window = max(1, int(window))
+        self._ref_samples: List[np.ndarray] = []
+        self._fallback: List[np.ndarray] = []
+        self._recent: List[np.ndarray] = []
+
+    def reference(self) -> Optional[np.ndarray]:
+        source = self._ref_samples or self._fallback
+        return np.median(np.vstack(source), axis=0) if source else None
+
+    def update(self, step_key: Optional[str], phase: str, features) -> Optional[dict]:
+        if features is None:
+            return None
+        x = pad_features(features)[0]
+        pose = np.array([x[7], x[8], x[6]])  # yaw, pitch, interocular
+        if not np.isfinite(pose).all() or pose[2] <= 0:
+            return None
+        if step_key == "still" and phase == PHASE_CAPTURING:
+            self._ref_samples.append(pose)
+        elif len(self._fallback) < 15:
+            self._fallback.append(pose)
+        self._recent = (self._recent + [pose])[-self.window :]
+        axis = HEAD_STEP_AXIS.get(step_key or "")
+        ref = self.reference()
+        if axis is None or ref is None:
+            return None
+        cur = np.median(np.vstack(self._recent), axis=0)
+        if axis == "yaw":
+            value = abs(float(np.degrees(cur[0] - ref[0])))
+        elif axis == "pitch":
+            value = abs(float(np.degrees(cur[1] - ref[1])))
+        else:  # la distancia es inversa a la separación de los ojos en la imagen
+            value = abs(float(ref[2] / cur[2] - 1.0)) * 100.0
+        lo, hi = self.targets[axis]
+        return {"axis": axis, "value": value, "lo": lo, "hi": hi, "in_zone": lo <= value <= hi}
+
+
+def head_guide_text(state: Optional[dict]) -> str:
+    """Texto del indicador en vivo de la fase de cabeza (vacío sin estado)."""
+    if not state:
+        return ""
+    unit = "%" if state["axis"] == "depth" else "°"
+    name = {"yaw": "Giro", "pitch": "Inclinación", "depth": "Distancia"}[state["axis"]]
+    if state["in_zone"]:
+        verdict = "bien, quédate así"
+    elif state["value"] < state["lo"]:
+        verdict = "un poco más"
+    else:
+        verdict = "demasiado, vuelve un poco"
+    return f"{name}: {state['value']:.0f}{unit} (objetivo {state['lo']:.0f}-{state['hi']:.0f}{unit}): {verdict}"
 
 # Puntos de validación (fracción de la pantalla): centro desplazado y cuatro intermedios, todos
 # distintos de la cuadrícula 3x3 de calibración. Miden el error real con puntos no usados al ajustar.
@@ -717,10 +852,18 @@ class CalibrationResult:
     val_targets: Optional[np.ndarray] = None
     val_groups: Optional[np.ndarray] = None
     ear_points: Optional[np.ndarray] = None  # (k, 2) por punto: [altura del iris, EAR] medianos (GazeEarModel)
+    # lo mismo con un solo ojo: "right"/"left" -> (k, 2) [iris_perp del ojo, EAR del ojo] (si update recibió ears)
+    ear_points_by_eye: Optional[Dict[str, np.ndarray]] = None
 
     @property
     def has_validation(self) -> bool:
         return self.val_features is not None and len(self.val_features) > 0
+
+    def ear_points_for(self, eye: str = "both") -> Optional[np.ndarray]:
+        """Puntos [altura, EAR] del ojo elegido; sin datos de ese ojo, los de los dos (el factor es relativo)."""
+        if eye != "both" and self.ear_points_by_eye and eye in self.ear_points_by_eye:
+            return self.ear_points_by_eye[eye]
+        return self.ear_points
 
 
 class CalibrationSession:
@@ -748,7 +891,8 @@ class CalibrationSession:
     Si `update` recibe el EAR (`ear=`, lo que hace la aplicación), los ojos cerrados se deciden con el
     EAR del propio punto (local_open_mask) y no con `eyes_closed` del BlinkDetector global, que tomaba la
     mirada hacia abajo por un cierre. Además se guarda por punto la altura del iris y el EAR medianos
-    (`ear_points` del resultado) para ajustar el GazeEarModel del control.
+    (`ear_points` del resultado) para ajustar el GazeEarModel del control; con `ears=` (EAR derecho e
+    izquierdo) también por ojo (`ear_points_by_eye`), para el modelo del ojo que se elija.
     """
 
     def __init__(
@@ -799,7 +943,9 @@ class CalibrationSession:
         self._samples: List[np.ndarray] = []
         self._sample_t: List[float] = []
         self._sample_ear: List[float] = []
+        self._sample_ears: List[Tuple[float, float]] = []  # (EAR derecho, EAR izquierdo)
         self._ear_points: List[Tuple[float, float]] = []
+        self._ear_points_by_eye: Dict[str, List[Tuple[float, float]]] = {"right": [], "left": []}
         self._done_features: List[np.ndarray] = []
         self._done_targets: List[np.ndarray] = []
         self._done_groups: List[np.ndarray] = []
@@ -866,9 +1012,11 @@ class CalibrationSession:
         valid: bool,
         eyes_closed: bool = False,
         ear: Optional[float] = None,
+        ears: Optional[Tuple[float, float]] = None,
     ) -> str:
         """Procesa un cuadro (o un tick sin rostro con valid=False). Devuelve la fase actual.
-        Con `ear` (y robust) se ignora `eyes_closed`: el cierre se decide por punto al terminarlo."""
+        Con `ear` (y robust) se ignora `eyes_closed`: el cierre se decide por punto al terminarlo.
+        `ears` = (EAR derecho, EAR izquierdo), solo para los modelos EAR-mirada de cada ojo."""
         if self.finished:
             return self.phase
         if self.in_head:
@@ -899,6 +1047,8 @@ class CalibrationSession:
                 self._samples.append(np.asarray(features, dtype=float).copy())
                 self._sample_t.append(float(timestamp))
                 self._sample_ear.append(float("nan") if ear is None else float(ear))
+                pair = (float("nan"), float("nan")) if ears is None else (float(ears[0]), float(ears[1]))
+                self._sample_ears.append(pair)
         return self.phase
 
     def _update_head(self, timestamp: float) -> str:
@@ -944,16 +1094,23 @@ class CalibrationSession:
             self.discarded += int((~keep).sum())
             self._samples = [s for s, k in zip(self._samples, keep) if k]
             self._sample_ear = [e for e, k in zip(self._sample_ear, keep) if k]
+            self._sample_ears = [e for e, k in zip(self._sample_ears, keep) if k]
         self._sample_t = []
 
     def _reset_samples(self):
-        self._samples, self._sample_t, self._sample_ear = [], [], []
+        self._samples, self._sample_t, self._sample_ear, self._sample_ears = [], [], [], []
 
     def _record_ear_point(self):
-        """Altura del iris y EAR medianos del punto aceptado (para GazeEarModel)."""
+        """Altura del iris y EAR medianos del punto aceptado (para GazeEarModel), de los dos ojos y de cada uno."""
         ears = np.asarray(self._sample_ear, dtype=float)
-        if len(ears) and np.isfinite(ears).all():
-            self._ear_points.append((float(np.median(iris_height(np.vstack(self._samples)))), float(np.median(ears))))
+        if not (len(ears) and np.isfinite(ears).all()):
+            return
+        x = np.vstack(self._samples)
+        self._ear_points.append((float(np.median(iris_height(x))), float(np.median(ears))))
+        pairs = np.asarray(self._sample_ears, dtype=float).reshape(-1, 2)
+        if len(pairs) == len(x) and np.isfinite(pairs).all():
+            for k, eye in enumerate(("right", "left")):
+                self._ear_points_by_eye[eye].append((float(np.median(iris_height(x, eye))), float(np.median(pairs[:, k]))))
 
     def _finish_attempt(self, timestamp: float):
         self._clean_samples()
@@ -1032,26 +1189,71 @@ class CalibrationSession:
         if self._val_features:
             val = (np.vstack(self._val_features), np.vstack(self._val_targets), np.concatenate(self._val_groups))
         ear_points = np.asarray(self._ear_points, dtype=float) if self._ear_points else None
+        by_eye = {e: np.asarray(p, dtype=float) for e, p in self._ear_points_by_eye.items() if p}
         return CalibrationResult(
             np.vstack(self._done_features),
             np.vstack(self._done_targets),
             np.concatenate(self._done_groups),
             *val,
             ear_points=ear_points,
+            ear_points_by_eye=by_eye or None,
         )
 
 
-def fit_session(session: CalibrationSession, options: Optional[dict] = None) -> GazeMapper:
-    """Ajusta un GazeMapper (DEFAULT_FIT salvo `options`) con una sesión terminada; si hubo fase de
-    validación, sus puntos nuevos dan el error mostrado (metrics["validation_px"])."""
-    res = session.result()
-    mapper = GazeMapper.from_fit_options(options)
+def fit_result(res: CalibrationResult, options: Optional[dict] = None, eye: str = "both") -> GazeMapper:
+    """Ajusta un GazeMapper (DEFAULT_FIT salvo `options`) con el iris de `eye`; si hubo fase de validación,
+    sus puntos nuevos dan el error mostrado (metrics["validation_px"])."""
+    mapper = GazeMapper.from_fit_options(dict(options or {}, eye=eye))
     if res.has_validation:
         mapper.fit(res.features, res.targets, res.groups, res.val_features, res.val_targets, res.val_groups)
     else:
         mapper.fit(res.features, res.targets, res.groups)
+    return mapper
+
+
+def result_jitter_px(mapper: GazeMapper, res: CalibrationResult) -> float:
+    """prediction_jitter_px con los puntos de calibración y de validación (más puntos, menos ruido)."""
+    x, g = res.features, res.groups
+    if res.has_validation:
+        x = np.vstack([pad_features(x), pad_features(res.val_features)])
+        g = np.concatenate([g, np.asarray(res.val_groups) + int(np.max(res.groups)) + 1])
+    return prediction_jitter_px(mapper, x, g)
+
+
+def fit_session(session: CalibrationSession, options: Optional[dict] = None, eye_mode: str = "auto") -> GazeMapper:
+    """Ajusta el mapeo de una sesión terminada eligiendo el ojo (config.json tracking.eye).
+
+    "auto": ajusta con cada ojo y con los dos y se queda con choose_eye (menor temblor entre los de error
+    parecido al mejor); "right"/"left"/"both" fuerzan ese ojo. La comparación queda en
+    metrics["eye_selection"] y el modelo EAR-mirada se ajusta con el ojo elegido.
+    """
+    if eye_mode not in EYE_MODES:
+        raise ValueError(f"modo de ojo desconocido: {eye_mode}")
+    res = session.result()
+    eyes = EYES if eye_mode == "auto" else (eye_mode,)
+    mappers, candidates = {}, {}
+    for eye in eyes:
+        try:
+            mapper = fit_result(res, options, eye)
+        except (ValueError, np.linalg.LinAlgError):
+            if eye_mode != "auto":
+                raise
+            continue
+        mappers[eye] = mapper
+        candidates[eye] = {"error_px": mapper.estimated_error_px, "jitter_px": result_jitter_px(mapper, res)}
+    if not mappers:
+        raise ValueError("No se pudo ajustar la calibración con ningún ojo")
+    chosen = choose_eye(candidates) if eye_mode == "auto" else eye_mode
+    if chosen not in mappers:  # sin métricas finitas: el primero que se pudo ajustar
+        chosen = next(iter(mappers))
+    mapper = mappers[chosen]
     mapper.metrics["discarded_samples"] = int(session.discarded)
-    mapper.blink_model = GazeEarModel.fit(res.ear_points)
+    mapper.metrics["eye_selection"] = {
+        "mode": eye_mode,
+        "chosen": chosen,
+        "candidates": {e: {k: float(v) for k, v in c.items()} for e, c in candidates.items()},
+    }
+    mapper.blink_model = GazeEarModel.fit(res.ear_points_for(chosen))
     return mapper
 
 

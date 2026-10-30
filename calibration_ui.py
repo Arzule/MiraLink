@@ -33,10 +33,12 @@ from calibration import (
     WARN_ERROR_PX,
     CalibrationSession,
     GazeMapper,
+    HeadPoseGuide,
     HoldToExit,
     RecenterSession,
     face_guidance,
     fit_session,
+    head_guide_text,
     save_calibration,
     screen_geometry_from_qt,
     validation_points,
@@ -170,13 +172,17 @@ class CalibrationScreen(QWidget):
         clock: Callable[[], float] = time.monotonic,
         parent=None,
         recorder=None,
+        eye_mode: str = "auto",
     ):
         super().__init__(parent)
         self.session = session
         self.dpr = dpr if dpr > 0 else 1.0
         self.fit_options = fit_options  # None = calibration.DEFAULT_FIT
+        self.eye_mode = eye_mode  # config.json tracking.eye: auto elige el ojo de menor temblor
         self.clock = clock
         self.recorder = recorder  # gaze_session.SessionRecorder en --record-session
+        self.head_guide = HeadPoseGuide()  # indicador en vivo de la fase de cabeza
+        self.head_state: Optional[dict] = None
         self._layout_stage = session.stage
         self.hold = HoldToExit(self.HOLD_EXIT_S)
         self._last_frame_wall = -1e9
@@ -211,7 +217,11 @@ class CalibrationScreen(QWidget):
         # Los ojos cerrados los decide la sesión con el EAR de cada punto (mirar abajo baja el párpado)
         valid = bool(frame.face_found and frame.features is not None)
         ear = float(frame.ear_mean) if frame.face_found else None
-        self.session.update(frame.timestamp, frame.features, valid, eyes_closed=bool(frame.eyes_closed), ear=ear)
+        ears = (float(frame.ear_right), float(frame.ear_left)) if frame.face_found else None
+        if self.session.in_head:
+            step = self.session.head_step
+            self.head_state = self.head_guide.update(step[0] if step else None, self.session.phase, frame.features)
+        self.session.update(frame.timestamp, frame.features, valid, eyes_closed=bool(frame.eyes_closed), ear=ear, ears=ears)
         self._check_finished()
         self._sync_layout()
         self.update()
@@ -249,7 +259,7 @@ class CalibrationScreen(QWidget):
             self._finished = True
             self._timer.stop()
             try:
-                mapper = fit_session(self.session, self.fit_options)
+                mapper = fit_session(self.session, self.fit_options, self.eye_mode)
             except Exception as e:  # noqa: BLE001
                 self._finished = False
                 self._abort(f"No se pudo ajustar la calibración: {e}")
@@ -310,7 +320,10 @@ class CalibrationScreen(QWidget):
         title = QRectF(w * 0.15, h * title_y - title_h / 2, w * 0.70, title_h)
         notice = QRectF((w - notice_w) / 2, h * band_y - 32, notice_w, 64)
         mini = QRectF(w - 24 - 240, h * band_y - 135 / 2, 240, 135)
-        return {"title": title, "notice": notice, "mini": mini}
+        regions = {"title": title, "notice": notice, "mini": mini}
+        if stage == STAGE_HEAD:  # indicador en vivo del giro, bajo el título (lejos del punto central)
+            regions["guide"] = QRectF(w * 0.25, title.bottom() + 8, w * 0.50, 44)
+        return regions
 
     def _place_mini(self):
         m = self.layout_regions()["mini"]
@@ -401,8 +414,7 @@ class CalibrationScreen(QWidget):
         )
         if head:
             n_head = len(s.head_motion)
-            moving = s.phase == "capturing"
-            action = ("Quieto" if s.head_step and s.head_step[0] == "still" else "Ahora, despacio") if moving else "Prepárate"
+            action = "Quédate quieto" if s.phase == "capturing" else "Prepárate"
             pill_text = f"Paso {min(s.head_index + 1, n_head)} de {n_head}: {action}"
         elif validating:
             n_val = len(s.validation)
@@ -423,6 +435,8 @@ class CalibrationScreen(QWidget):
             p.setPen(BAD_RED)
             p.setFont(_font(11 * scale))
             p.drawText(QRectF(t.x(), pill.bottom() + 6, t.width(), 28), Qt.AlignCenter, s.message)
+        if head and self.head_state and "guide" in regions:
+            self._paint_head_guide(p, regions["guide"], self.head_state)
 
         # aviso ESC semiopaco con progreso
         n = regions["notice"]
@@ -454,6 +468,26 @@ class CalibrationScreen(QWidget):
             p.setBrush(ACCENT)
             p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * hp, bar.height()), 2.5, 2.5)
         p.end()
+
+    @staticmethod
+    def _paint_head_guide(p: QPainter, r: QRectF, state: dict):
+        """Texto del giro actual y barra con la zona objetivo (verde dentro, ámbar fuera)."""
+        color = OK_GREEN if state["in_zone"] else QColor("#FFB020")
+        p.setPen(color)
+        p.setFont(_font(12, True))
+        p.drawText(QRectF(r.x(), r.y(), r.width(), 24), Qt.AlignCenter, head_guide_text(state))
+        bar = QRectF(r.x(), r.y() + 30, r.width(), 8)
+        span = max(state["hi"] * 1.5, 1.0)  # la barra llega a 1.5 x el máximo de la zona
+        p.setPen(Qt.NoPen)
+        p.setBrush(BORDER)
+        p.drawRoundedRect(bar, 4, 4)
+        zone_col = QColor(OK_GREEN)
+        zone_col.setAlpha(110)
+        p.setBrush(zone_col)
+        p.drawRect(QRectF(bar.x() + bar.width() * state["lo"] / span, bar.y(), bar.width() * (state["hi"] - state["lo"]) / span, bar.height()))
+        x = bar.x() + bar.width() * min(state["value"], span) / span
+        p.setBrush(color)
+        p.drawEllipse(QPointF(x, bar.center().y()), 7, 7)
 
 
 # ------------------------------------------------------------ recentrar
@@ -634,8 +668,31 @@ def error_source_text(
     return "Error de ajuste sobre los propios puntos de calibración (optimista)."
 
 
+EYE_LABELS = {"both": "los dos ojos", "right": "tu ojo derecho", "left": "tu ojo izquierdo"}
+EYE_SHORT = {"both": "ambos", "right": "derecho", "left": "izquierdo"}
+
+
+def eye_selection_text(selection: Optional[dict]) -> str:
+    """Qué ojo se usa y por qué (metrics["eye_selection"] de fit_session); vacío sin datos."""
+    if not selection or selection.get("chosen") not in EYE_LABELS:
+        return ""
+    chosen = selection["chosen"]
+    if selection.get("mode") != "auto":
+        return f"Ojo usado: {EYE_LABELS[chosen]} (fijado en config.json, tracking.eye)."
+    cands = selection.get("candidates") or {}
+    parts = [
+        f"{EYE_SHORT[e]} {int(round(c['jitter_px']))} px de temblor / {int(round(c['error_px']))} px de error"
+        for e, c in cands.items()
+        if e in EYE_SHORT and math.isfinite(c.get("jitter_px", math.nan)) and math.isfinite(c.get("error_px", math.nan))
+    ]
+    text = f"Ojo usado: {EYE_LABELS[chosen]}, elegido por tener el menor temblor entre los de error parecido."
+    if parts:
+        text += " Comparación: " + "; ".join(parts) + "."
+    return text
+
+
 class CalibrationResultDialog(QDialog):
-    """"Calibración completada. Error estimado: ~N px" con Aceptar / Repetir y de dónde sale el error."""
+    """"Calibración completada. Error estimado: ~N px" con Aceptar / Repetir, de dónde sale el error y el ojo usado."""
 
     def __init__(
         self,
@@ -646,6 +703,7 @@ class CalibrationResultDialog(QDialog):
         points: int = 0,
         raw_px: Optional[float] = None,
         skipped_px: Optional[float] = None,
+        eye_text: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("Calibración completada")
@@ -666,6 +724,12 @@ class CalibrationResultDialog(QDialog):
         self.source_label.setAccessibleName("Origen del error estimado")
         self.source_label.setVisible(bool(source))
         layout.addWidget(self.source_label)
+        self.eye_label = QLabel(eye_text)
+        self.eye_label.setObjectName("description")
+        self.eye_label.setWordWrap(True)
+        self.eye_label.setAccessibleName("Ojo usado para seguir la mirada")
+        self.eye_label.setVisible(bool(eye_text))
+        layout.addWidget(self.eye_label)
         self.warning_label = QLabel(
             f"El error estimado supera {WARN_ERROR_PX} px: el control podría ser impreciso. "
             "Te recomendamos repetir la calibración con mejor iluminación y sin mover la cabeza."
@@ -983,8 +1047,14 @@ class CalibrationDialog(QDialog):
             session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced", head_motion=head)
             logger.info("Orden de los puntos de calibración: %s", session.order)
             self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
+            from config_manager import eye_mode
+
             scr = CalibrationScreen(
-                session, dpr=float(screen.devicePixelRatio()), clock=self.clock, recorder=self.recorder
+                session,
+                dpr=float(screen.devicePixelRatio()),
+                clock=self.clock,
+                recorder=self.recorder,
+                eye_mode=eye_mode(self.config),
             )
             scr.completed.connect(self._on_completed)
             scr.aborted.connect(self._on_aborted)
@@ -1068,6 +1138,7 @@ class CalibrationDialog(QDialog):
             points=int(mapper.metrics.get("validation_points", 0)),
             raw_px=mapper.metrics.get("validation_px"),
             skipped_px=mapper.metrics.get("validation_corrected_px") if mapper.metrics.get("auto_offset_skipped") else None,
+            eye_text=eye_selection_text(mapper.metrics.get("eye_selection")),
         )
         accepted = self._result_dialog_exec(dlg)
         if accepted:

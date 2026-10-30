@@ -204,7 +204,8 @@ class ControlSession(QObject):
 
                 size = self.camera_size_getter()
                 blink_model = getattr(mapper, "blink_model", None)  # EAR esperado según la altura de la mirada
-                factory = lambda i: TrackerThread(i, camera_size=size, blink_model=blink_model)  # noqa: E731
+                eye = getattr(mapper, "eye", "both")  # los parpadeos se detectan con el ojo de la calibración
+                factory = lambda i: TrackerThread(i, camera_size=size, blink_model=blink_model, eye=eye)  # noqa: E731
             self.tracker = factory(self.camera_index_getter())
             self.tracker.frame_ready.connect(self._on_frame)
             self.tracker.failed.connect(self._on_tracker_failed)

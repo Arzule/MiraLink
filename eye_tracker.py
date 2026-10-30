@@ -180,12 +180,30 @@ def extract_features(landmarks: np.ndarray, size: Tuple[int, int], matrix: Optio
     )
 
 
-def gaze_perp(features: Optional[np.ndarray]) -> Optional[float]:
-    """Altura del iris en el ojo (media de los dos iris_perp; positivo = abajo) o None."""
+EYES = ("both", "right", "left")  # como calibration.EYES (ojo con el que se sigue la mirada)
+
+
+def gaze_perp(features: Optional[np.ndarray], eye: str = "both") -> Optional[float]:
+    """Altura del iris en el ojo (iris_perp del ojo, o media de los dos; positivo = abajo) o None."""
     if features is None or len(features) < 4:
         return None
-    value = (float(features[1]) + float(features[3])) / 2.0
+    if eye == "right":
+        value = float(features[1])
+    elif eye == "left":
+        value = float(features[3])
+    else:
+        value = (float(features[1]) + float(features[3])) / 2.0
     return value if math.isfinite(value) else None
+
+
+def frame_ear(frame: "TrackingFrame", eye: str = "both") -> float:
+    """EAR del ojo con el que se sigue la mirada (el promedio con "both"). Con un solo ojo funcional, el
+    promedio mezclaría el otro ojo (cerrado o sin parpadeo normal) y daría falsos clics o ningún clic."""
+    if eye == "right":
+        return frame.ear_right
+    if eye == "left":
+        return frame.ear_left
+    return frame.ear_mean
 
 
 def build_tracking_frame(
@@ -220,7 +238,7 @@ def build_tracking_frame(
 
 # ---------------------------------------------------------- BlinkDetector
 class BlinkDetector:
-    """Detecta parpadeos desde el EAR promedio con línea base adaptativa.
+    """Detecta parpadeos desde el EAR (el promedio, o el del ojo elegido: frame_ear) con línea base adaptativa.
 
     - Línea base: percentil `baseline_percentile` del EAR reciente con los ojos abiertos
       (ventana móvil de `window_s`); no se actualiza mientras los ojos están cerrados.
@@ -359,7 +377,10 @@ def _fourcc_text(value) -> str:
     except (TypeError, ValueError):
         return ""
     text = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4))
-    return text if text.isprintable() and text.strip() else ""
+    # solo letras y números ASCII (YUY2, MJPG, NV12): un código sin sentido salía como "}ë6ä" en la UI
+    if not text.strip() or not all(c == " " or (c.isascii() and c.isalnum()) for c in text):
+        return ""
+    return text.strip()
 
 
 def _area(size) -> int:
@@ -688,7 +709,8 @@ class FpsMeter:
 
 
 class EyeTrackingPipeline:
-    """Cámara -> FaceTracker -> BlinkDetector. Los tres se inyectan (versiones falsas en tests)."""
+    """Cámara -> FaceTracker -> BlinkDetector. Los tres se inyectan (versiones falsas en tests).
+    `eye` (EYES): ojo cuyo EAR y altura del iris usa el detector de parpadeos (el de la calibración)."""
 
     def __init__(
         self,
@@ -697,9 +719,13 @@ class EyeTrackingPipeline:
         detector: Optional[BlinkDetector] = None,
         clock: Callable[[], float] = time.monotonic,
         blink_model=None,
+        eye: str = "both",
     ):
+        if eye not in EYES:
+            raise ValueError(f"ojo desconocido: {eye}")
         self.camera = camera
         self.tracker = tracker
+        self.eye = eye
         self.detector = detector or BlinkDetector(gaze_model=blink_model)
         self.clock = clock
         self.fps_meter = FpsMeter()
@@ -714,7 +740,7 @@ class EyeTrackingPipeline:
         ts = self.clock()
         frame = self.tracker.process(image, ts)
         frame.image = image
-        event = self.detector.update(ts, frame.ear_mean, frame.face_found, gaze_perp(frame.features))
+        event = self.detector.update(ts, frame_ear(frame, self.eye), frame.face_found, gaze_perp(frame.features, self.eye))
         frame.eyes_closed = self.detector.is_closed
         frame.blink_event = event
         frame.fps = self.fps_meter.update(ts)
@@ -746,11 +772,13 @@ def _make_tracker_thread_class():
             clock: Callable[[], float] = time.monotonic,
             camera_size: Optional[Tuple[int, int]] = FALLBACK_SIZE,
             blink_model=None,
+            eye: str = "both",
         ):
             super().__init__(parent)
             self.camera_index = camera_index
             self.model_path = model_path
             self.blink_model = blink_model  # GazeEarModel de la calibración (o None)
+            self.eye = eye  # ojo de la calibración: su EAR decide los parpadeos
             # camera_size None = resolución nativa (CameraSource elige la mayor que sostiene ~30 fps)
             w, h = (None, None) if camera_size is None else (int(camera_size[0]), int(camera_size[1]))
             self._camera_factory = camera_factory or (lambda i: CameraSource(i, w, h))
@@ -770,7 +798,9 @@ def _make_tracker_thread_class():
                 tracker = self._tracker_factory(self.model_path)
                 camera.open()
                 logger.info("Cámara %s abierta", self.camera_index)
-                pipeline = EyeTrackingPipeline(camera, tracker, clock=self._clock, blink_model=self.blink_model)
+                pipeline = EyeTrackingPipeline(
+                    camera, tracker, clock=self._clock, blink_model=self.blink_model, eye=self.eye
+                )
                 misses = 0
                 last_fps_log = None
                 while not self._stop_requested:

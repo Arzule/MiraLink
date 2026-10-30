@@ -27,6 +27,7 @@ from app_paths import data_dir
 from calibration import (
     AGGREGATES,
     DEFAULT_FIT,
+    EYES,
     FEATURE_SETS,
     MODELS,
     PHASE_CAPTURING,
@@ -36,9 +37,11 @@ from calibration import (
     CalibrationSession,
     GazeEarModel,
     GazeMapper,
+    choose_eye,
     filter_point_samples,
     iris_height,
     local_open_mask,
+    prediction_jitter_px,
     validation_points,
 )
 from config_manager import DEFAULT_CONFIG
@@ -111,6 +114,7 @@ class SessionRecorder:
         self._closed: List[bool] = []
         self._blink_ms: List[float] = []
         self._ear: List[float] = []
+        self._ear_eyes: List[Tuple[float, float]] = []  # (EAR derecho, EAR izquierdo)
         self._stage: List[int] = []
         self._point: List[int] = []
         self._phase: List[int] = []
@@ -135,6 +139,7 @@ class SessionRecorder:
         event = getattr(frame, "blink_event", None)
         self._blink_ms.append(float(event.duration_ms) if event is not None else 0.0)
         self._ear.append(float(getattr(frame, "ear_mean", 0.0)))
+        self._ear_eyes.append((float(getattr(frame, "ear_right", 0.0)), float(getattr(frame, "ear_left", 0.0))))
         self._stage.append(STAGE_CODES.get(session.stage, 0))
         self._point.append(int(session.active_index))
         self._phase.append(PHASE_CODES.get(session.phase, 2) if not session.finished else 2)
@@ -177,6 +182,7 @@ class SessionRecorder:
             "closed": np.asarray(self._closed, dtype=bool),
             "blink_ms": np.asarray(self._blink_ms, dtype=np.float32),
             "ear": np.asarray(self._ear, dtype=np.float32),
+            "ear_eyes": np.asarray(self._ear_eyes, dtype=np.float32).reshape(n, 2),  # derecho, izquierdo
             "stage": np.asarray(self._stage, dtype=np.int8),
             "point": np.asarray(self._point, dtype=np.int16),
             "phase": np.asarray(self._phase, dtype=np.int8),
@@ -242,6 +248,7 @@ class RecordedSession:
     landmarks: Optional[np.ndarray] = None
     matrix: Optional[np.ndarray] = None
     blendshapes: Optional[np.ndarray] = None  # (n, len(EYE_BLENDSHAPES)); no existe en sesiones anteriores
+    ear_eyes: Optional[np.ndarray] = None  # (n, 2) EAR derecho e izquierdo; desde la elección del ojo
 
     @classmethod
     def from_arrays(cls, arrays: Dict[str, np.ndarray], meta: dict) -> "RecordedSession":
@@ -260,6 +267,7 @@ class RecordedSession:
             landmarks=arrays.get("landmarks"),
             matrix=arrays.get("matrix"),
             blendshapes=arrays.get("blendshapes"),
+            ear_eyes=arrays.get("ear_eyes"),
         )
 
     def __len__(self) -> int:
@@ -348,7 +356,11 @@ class SyntheticUser:
         validation_shift_rad: Tuple[float, float, float] = (0.03, 0.02, 0.01),
         blink_period_s: float = 4.0,
         pose_noise_rad: float = 0.008,
+        eye_noise: Optional[Tuple[float, float]] = None,
+        eye_gain: Tuple[float, float] = (1.0, 1.0),
     ):
+        """`eye_noise` (derecho, izquierdo) sustituye a iris_noise por ojo; `eye_gain` escala cuánto sigue
+        cada iris a la mirada (0 = ojo que no sigue los puntos, como un ojo no funcional)."""
         self.rng = rng
         self.width, self.height = width, height
         self.phys = physical_mm
@@ -365,6 +377,8 @@ class SyntheticUser:
         self.val_shift_rad = np.asarray(validation_shift_rad, dtype=float)
         self.blink_period = blink_period_s
         self.pose_noise = pose_noise_rad
+        self.eye_noise = tuple(eye_noise) if eye_noise is not None else (iris_noise, iris_noise)
+        self.eye_gain = tuple(eye_gain)
         self.pos = np.array([0.0, 0.0, distance_mm])
         self.rot = np.array([0.0, -0.05, 0.0])  # yaw, pitch, roll
         self._t: Optional[float] = None
@@ -379,13 +393,22 @@ class SyntheticUser:
         k = min(1.0, dt / self.head_tau)
         return x + (mu - x) * k + sigma * math.sqrt(2.0 * k) * self.rng.normal(size=np.shape(x))
 
-    # Movimiento guionado de la fase de cabeza: amplitud de cada paso (2 ciclos por paso)
-    HEAD_MOTION_AMPLITUDE = {"yaw": 0.25, "pitch": 0.15, "depth": 100.0}  # rad, rad, mm
+    # Poses de la fase de cabeza (HEAD_MOTION_STEPS): ~10° de giro/inclinación y ~15 % de distancia.
+    # (eje, desplazamiento): yaw/pitch en rad, depth en mm. La pose se alcanza durante la segunda mitad
+    # del asentamiento y se mantiene quieta en la captura.
+    HEAD_POSES = {
+        "left": ("yaw", 0.17), "right": ("yaw", -0.17), "up": ("pitch", -0.17), "down": ("pitch", 0.17),
+        "near": ("depth", -90.0), "far": ("depth", 90.0),
+    }
 
     def frame(
-        self, t: float, target: Tuple[float, float], stage: str = "calibration", motion: Optional[Tuple[str, float]] = None
+        self,
+        t: float,
+        target: Tuple[float, float],
+        stage: str = "calibration",
+        motion: Optional[Tuple[str, str, float]] = None,
     ) -> TrackingFrame:
-        """`motion` = (clave del paso de HEAD_MOTION_STEPS, avance 0..1) mientras se mueve la cabeza."""
+        """`motion` = (clave del paso de HEAD_MOTION_STEPS, fase, avance 0..1) en la fase de cabeza."""
         dt = 1.0 / 30.0 if self._t is None else max(1e-3, t - self._t)
         self._t = t
         shift = stage in (STAGE_VALIDATION, "head")
@@ -394,15 +417,16 @@ class SyntheticUser:
         self.pos = self._ou(self.pos, mu_pos, self.head_sigma_mm, dt)
         self.rot = self._ou(self.rot, mu_rot, self.head_sigma_rad, dt)
         pos, rot = self.pos, self.rot
-        if motion is not None and motion[0] in self.HEAD_MOTION_AMPLITUDE:
-            wave = self.HEAD_MOTION_AMPLITUDE[motion[0]] * math.sin(4.0 * math.pi * motion[1])
+        if motion is not None and motion[0] in self.HEAD_POSES:
+            axis, amount = self.HEAD_POSES[motion[0]]
+            ramp = 1.0 if motion[1] == PHASE_CAPTURING else float(np.clip(2.0 * motion[2] - 1.0, 0.0, 1.0))
             pos, rot = pos.copy(), rot.copy()
-            if motion[0] == "yaw":
-                rot[0] += wave
-            elif motion[0] == "pitch":
-                rot[1] += wave
+            if axis == "yaw":
+                rot[0] += amount * ramp
+            elif axis == "pitch":
+                rot[1] += amount * ramp
             else:
-                pos[2] += wave
+                pos[2] += amount * ramp
 
         # la mirada cambia de objetivo con una latencia de reacción
         target = (float(target[0]), float(target[1]))
@@ -450,9 +474,9 @@ class SyntheticUser:
         along = 0.40 * math.sin(ex) + 0.10 * yaw  # la perspectiva acopla el giro de la cabeza
         perp = 0.28 * math.sin(ey) + 0.06 * ex * ex + 0.08 * pitch
         eyes = []
-        for vergence in (0.01, -0.01):
-            a = along + vergence + rng.normal(0, self.iris_noise)
-            p = perp + rng.normal(0, self.iris_noise)
+        for vergence, noise, gain in zip((0.01, -0.01), self.eye_noise, self.eye_gain):
+            a = gain * along + vergence + rng.normal(0, noise)
+            p = gain * perp + rng.normal(0, noise)
             if rng.random() < self.spike_rate:
                 a += rng.normal(0, self.spike_size)
                 p += rng.normal(0, self.spike_size)
@@ -515,8 +539,8 @@ def synthesize_session(
             dt += 1.0 / fps  # cuadro perdido
         t += max(0.005, dt)
         motion = None
-        if session.in_head and session.phase == PHASE_CAPTURING:
-            motion = (session.head_step[0], session.phase_progress(t))
+        if session.in_head and not session.finished:
+            motion = (session.head_step[0], session.phase, session.phase_progress(t))
         frame = user.frame(t, session.current_point, session.stage, motion)
         rec.add(frame, session)
         valid = frame.face_found and not frame.eyes_closed and frame.features is not None
@@ -591,21 +615,25 @@ def robust_samples(session: "RecordedSession", stage: str = "calibration"):
     return x[keep], y[keep], g[keep]
 
 
-def ear_points(session: "RecordedSession") -> Optional[np.ndarray]:
-    """[altura del iris, EAR] medianos por punto (calibración y validación), como CalibrationSession."""
+def ear_points(session: "RecordedSession", eye: str = "both") -> Optional[np.ndarray]:
+    """[altura del iris, EAR] medianos por punto (calibración y validación), como CalibrationSession.
+    Con un ojo y EAR por ojo grabado, la altura y el EAR de ese ojo (sin él, los de los dos)."""
     if session.ear is None:
         return None
+    per_eye = eye != "both" and session.ear_eyes is not None
     rows = []
     for stage in ("calibration", "validation"):
         m = session.capture_mask(stage)
         t, x, ear, g = session.t[m], session.features[m], session.ear[m], session.point[m]
+        eye_ear = session.ear_eyes[m][:, 0 if eye == "right" else 1] if per_eye else ear
         for p in np.unique(g):
             idx = np.flatnonzero(g == p)
             k = local_open_mask(t[idx], ear[idx])
             if k.any():
                 k[k] = filter_point_samples(x[idx][k])
             if k.sum() >= 3:
-                rows.append((float(np.median(iris_height(x[idx][k]))), float(np.median(ear[idx][k]))))
+                height = iris_height(x[idx][k], eye if per_eye else "both")
+                rows.append((float(np.median(height)), float(np.median(eye_ear[idx][k]))))
     return np.asarray(rows, dtype=float) if rows else None
 
 
@@ -934,14 +962,19 @@ TYPICAL_EYE_SPAN_MM = 93.0  # separación media entre las esquinas externas de l
 HEAD_POSE_COLS = (4, 5, 6, 7, 8)  # nose_x, nose_y, interocular, yaw, pitch
 
 
+HEAD_TRANSITION_S = 0.7  # se descartan los primeros 0.7 s de captura de cada paso (aún se está colocando)
+HEAD_ANGLE_BINS = ((0.0, 3.0), (3.0, 10.0), (10.0, 20.0), (20.0, float("inf")))  # grados respecto a la calibración
+
+
 def head_motion_report(session: "RecordedSession", distance_mm: float = DEFAULT_DISTANCE_MM) -> Dict[str, object]:
     """Fase de movimiento de cabeza (stage 2): cuánto se mueve el cursor del ajuste por defecto (solo iris)
-    mientras se mira el punto central moviendo la cabeza, frente a la pose de la calibración.
+    mientras se mira el punto central con la cabeza en otra pose, frente a la pose de la calibración.
 
-    Por paso: rango de la pose (p5-p95), dispersión del error y la pendiente del error frente al giro
-    (px/rad) o al desplazamiento, para compararla con la geometría: girar la cabeza un ángulo a desplaza el
-    punto mirado ~distancia x tan(a); en px, x los px/mm del monitor. Es la medida de la fase 1: todavía no
-    hay compensación.
+    Se descartan los primeros HEAD_TRANSITION_S de captura de cada paso. Por paso: pose media y rango
+    (p5-p95) y error del cursor. Con todos los cuadros: pendientes del error frente al giro (px/rad) y al
+    desplazamiento, para compararlas con la geometría (girar la cabeza un ángulo a desplaza el punto mirado
+    ~distancia x tan(a); en px, x los px/mm del monitor), y el error por rangos de ángulo de la cabeza
+    (HEAD_ANGLE_BINS). Es la medida de la fase 1: todavía no hay compensación.
     """
     stage = session.stage == STAGE_CODES["head"]
     if not stage.any():
@@ -964,10 +997,27 @@ def head_motion_report(session: "RecordedSession", distance_mm: float = DEFAULT_
         "px_per_mm": px_per_mm,
         "geometric_px_per_rad": distance_mm * px_per_mm if px_per_mm else None,
         "reference": ref,
+        "transition_s": HEAD_TRANSITION_S,
         "steps": [],
     }
+
+    def span(v):
+        return float(np.percentile(v, 95) - np.percentile(v, 5))
+
+    def slope(v, e):
+        if len(v) < 10 or np.ptp(v) < 1e-6:
+            return None, None
+        s = float(np.polyfit(v, e, 1)[0])
+        r = float(np.corrcoef(v, e)[0, 1]) if np.std(e) > 0 else 0.0
+        return s, r
+
+    pooled = []  # (diferencia de pose, error, mm por unidad) de todos los pasos
     for k in np.unique(session.point[stage]):
-        m = stage & (session.point == k) & (session.phase == 1) & session.valid_mask()
+        capture = stage & (session.point == k) & (session.phase == 1)
+        if not capture.any():
+            continue
+        start_t = float(session.t[np.flatnonzero(capture)[0]])
+        m = capture & session.valid_mask() & (session.t - start_t >= HEAD_TRANSITION_S)
         idx = np.flatnonzero(m)
         if len(idx) < 10:
             continue
@@ -980,41 +1030,57 @@ def head_motion_report(session: "RecordedSession", distance_mm: float = DEFAULT_
         d = feats[:, list(HEAD_POSE_COLS)] - ref
         iod = feats[:, 6]
         mm_per_unit = TYPICAL_EYE_SPAN_MM / np.maximum(iod, 1e-6)  # mm por unidad normalizada del cuadro
-
-        def span(v):
-            return float(np.percentile(v, 95) - np.percentile(v, 5))
-
-        def slope(v, e):
-            if np.ptp(v) < 1e-6:
-                return None, None
-            s = float(np.polyfit(v, e, 1)[0])
-            r = float(np.corrcoef(v, e)[0, 1]) if np.std(e) > 0 else 0.0
-            return s, r
-
+        pooled.append((d, err, mm_per_unit))
         key = steps[int(k)] if int(k) < len(steps) else str(int(k))
         norm = np.linalg.norm(err, axis=1)
-        row = {
-            "key": key,
-            "frames": int(len(idx)),
-            "yaw_deg": span(np.degrees(d[:, 3])),
-            "pitch_deg": span(np.degrees(d[:, 4])),
-            "shift_x_mm": span(d[:, 0] * mm_per_unit),
-            "shift_y_mm": span(d[:, 1] * mm_per_unit),
-            "distance_ratio": (float(np.percentile(ref[2] / iod, 5)), float(np.percentile(ref[2] / iod, 95))),
-            "bias_px": (float(np.median(err[:, 0])), float(np.median(err[:, 1]))),
-            "error_median_px": float(np.median(norm)),
-            "error_p90_px": float(np.percentile(norm, 90)),
-        }
-        row["slope_x_yaw"] = slope(d[:, 3], err[:, 0])
-        row["slope_y_pitch"] = slope(d[:, 4], err[:, 1])
-        row["slope_x_shift"] = slope(d[:, 0] * mm_per_unit, err[:, 0])  # px por mm de desplazamiento
-        out["steps"].append(row)
+        out["steps"].append(
+            {
+                "key": key,
+                "frames": int(len(idx)),
+                "yaw_offset_deg": float(np.degrees(np.median(d[:, 3]))),
+                "pitch_offset_deg": float(np.degrees(np.median(d[:, 4]))),
+                "distance_change_pct": float((np.median(ref[2] / iod) - 1.0) * 100.0),
+                "yaw_deg": span(np.degrees(d[:, 3])),
+                "pitch_deg": span(np.degrees(d[:, 4])),
+                "shift_x_mm": span(d[:, 0] * mm_per_unit),
+                "shift_y_mm": span(d[:, 1] * mm_per_unit),
+                "distance_ratio": (float(np.percentile(ref[2] / iod, 5)), float(np.percentile(ref[2] / iod, 95))),
+                "bias_px": (float(np.median(err[:, 0])), float(np.median(err[:, 1]))),
+                "error_median_px": float(np.median(norm)),
+                "error_p90_px": float(np.percentile(norm, 90)),
+            }
+        )
+    if pooled:
+        d = np.vstack([p[0] for p in pooled])
+        err = np.vstack([p[1] for p in pooled])
+        mm_per_unit = np.concatenate([p[2] for p in pooled])
+        out["slope_x_yaw"] = slope(d[:, 3], err[:, 0])
+        out["slope_y_pitch"] = slope(d[:, 4], err[:, 1])
+        out["slope_x_shift"] = slope(d[:, 0] * mm_per_unit, err[:, 0])  # px por mm de desplazamiento
+        angle = np.degrees(np.hypot(d[:, 3], d[:, 4]))
+        norm = np.linalg.norm(err, axis=1)
+        out["by_angle"] = []
+        for lo, hi in HEAD_ANGLE_BINS:
+            sel = (angle >= lo) & (angle < hi)
+            if sel.sum() >= 5:
+                out["by_angle"].append(
+                    {"lo": lo, "hi": hi, "frames": int(sel.sum()), "error_median_px": float(np.median(norm[sel])),
+                     "error_p90_px": float(np.percentile(norm[sel], 90))}
+                )
     return out
 
 
+HEAD_STEP_NAMES = {
+    "still": "quieto", "left": "girado a la izquierda", "right": "girado a la derecha", "up": "barbilla arriba",
+    "down": "barbilla abajo", "near": "más cerca", "far": "más lejos",
+    # sesiones anteriores al 30/10 (movimiento continuo)
+    "yaw": "girar izq./der.", "pitch": "subir/bajar barbilla", "depth": "acercarse/alejarse",
+}
+
+
 def format_head_motion_report(rep: Dict[str, object]) -> str:
-    names = {"still": "quieto", "yaw": "girar izq./der.", "pitch": "subir/bajar barbilla", "depth": "acercarse/alejarse"}
-    lines = ["Movimiento de cabeza (mirando el centro; ajuste por defecto, solo iris, sin compensar la cabeza)"]
+    lines = ["Movimiento de cabeza (mirando el centro; ajuste por defecto, solo iris, sin compensar la cabeza;"
+             f" sin los primeros {rep.get('transition_s', HEAD_TRANSITION_S):.1f} s de cada paso)"]
     geo = rep.get("geometric_px_per_rad")
     if geo:
         lines.append(f"  geometría a {rep['distance_mm'] / 10:.0f} cm: girar la cabeza 1 rad desplaza el punto mirado ~{geo:.0f} px"
@@ -1025,25 +1091,76 @@ def format_head_motion_report(rep: Dict[str, object]) -> str:
         return "-" if value is None else f"{value:+.0f} {unit} (r={r:+.2f})"
 
     for row in rep["steps"]:
-        lo, hi = row["distance_ratio"]
-        lines.append(
-            f"  {names.get(row['key'], row['key'])}: {row['frames']} cuadros; rango giro {row['yaw_deg']:.0f}°, inclinación"
-            f" {row['pitch_deg']:.0f}°, desplazamiento {row['shift_x_mm']:.0f}x{row['shift_y_mm']:.0f} mm, distancia"
-            f" x{lo:.2f}-x{hi:.2f}"
-        )
         bx, by = row["bias_px"]
+        lines.append(
+            f"  {HEAD_STEP_NAMES.get(row['key'], row['key'])}: {row['frames']} cuadros; giro {row['yaw_offset_deg']:+.0f}°,"
+            f" inclinación {row['pitch_offset_deg']:+.0f}°, distancia {row['distance_change_pct']:+.0f} %"
+            f" (rango p5-p95: giro {row['yaw_deg']:.0f}°, inclinación {row['pitch_deg']:.0f}°)"
+        )
         lines.append(
             f"      error del cursor: mediana {row['error_median_px']:.0f} px, p90 {row['error_p90_px']:.0f} px,"
             f" sesgo ({bx:+.0f}, {by:+.0f}) px"
         )
-        if row["key"] == "yaw":
-            lines.append(f"      pendiente error x / giro: {fmt_slope(row['slope_x_yaw'], 'px/rad')}")
-        elif row["key"] == "pitch":
-            lines.append(f"      pendiente error y / inclinación: {fmt_slope(row['slope_y_pitch'], 'px/rad')}")
-        if row["key"] in ("yaw", "depth"):
-            lines.append(f"      pendiente error x / desplazamiento: {fmt_slope(row['slope_x_shift'], 'px/mm')}")
     if not rep["steps"]:
         lines.append("  sin cuadros válidos en la fase de cabeza")
+        return "\n".join(lines)
+    lines.append(f"  pendiente error x / giro: {fmt_slope(rep['slope_x_yaw'], 'px/rad')}")
+    lines.append(f"  pendiente error y / inclinación: {fmt_slope(rep['slope_y_pitch'], 'px/rad')}")
+    lines.append(f"  pendiente error x / desplazamiento: {fmt_slope(rep['slope_x_shift'], 'px/mm')}")
+    if rep.get("by_angle"):
+        lines.append("  error por ángulo de la cabeza respecto a la calibración:")
+        for b in rep["by_angle"]:
+            label = f"> {b['lo']:.0f}°" if not math.isfinite(b["hi"]) else f"{b['lo']:.0f}-{b['hi']:.0f}°"
+            lines.append(f"    {label:>7}: mediana {b['error_median_px']:.0f} px, p90 {b['error_p90_px']:.0f} px ({b['frames']} cuadros)")
+    return "\n".join(lines)
+
+
+def eye_report(session: "RecordedSession") -> Dict[str, object]:
+    """Compara seguir la mirada con cada ojo y con los dos (DEFAULT_FIT con el filtrado robusto).
+
+    Por ojo: error mostrado al calibrar (como la aplicación), temblor de la estimación sin filtrar (el que
+    usa choose_eye) y desvío y jitter del cursor en la validación con el filtro real. `chosen` es el ojo
+    que elegiría la calibración automática.
+    """
+    x, y, g = robust_samples(session, "calibration")
+    if len(x) < 3:
+        raise ValueError("No hay muestras de calibración suficientes")
+    val = robust_samples(session, "validation") if session.has_validation else None
+    stage = "validation" if session.has_validation else "calibration"
+    jitter_x, jitter_g = x, g
+    if val is not None and len(val[0]):
+        jitter_x = np.vstack([x, val[0]])
+        jitter_g = np.concatenate([g, val[2] + int(g.max()) + 1])
+    rows: Dict[str, Dict[str, float]] = {}
+    for eye in EYES:
+        mapper = GazeMapper.from_fit_options({"eye": eye})
+        try:
+            if val is not None and len(val[0]):
+                mapper.fit(x, y, g, *val)
+            else:
+                mapper.fit(x, y, g)
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        fm = fixation_metrics(session, simulate_cursor(session, mapper), stage)
+        rows[eye] = {
+            "error_px": mapper.estimated_error_px,
+            "jitter_px": prediction_jitter_px(mapper, jitter_x, jitter_g),
+            "cursor_bias_px": fm["bias_px"],
+            "cursor_jitter_px": fm["jitter_px"],
+        }
+    return {"eyes": rows, "chosen": choose_eye(rows), "stage": stage}
+
+
+def format_eye_report(rep: Dict[str, object]) -> str:
+    names = {"both": "ambos", "right": "derecho", "left": "izquierdo"}
+    lines = ["Ojo usado (DEFAULT_FIT; temblor = dispersión de la estimación sin filtrar; cursor = con el filtro real"
+             f" en la {'validación' if rep['stage'] == 'validation' else 'calibración'})"]
+    for eye, r in rep["eyes"].items():
+        mark = "  <- elegido" if eye == rep["chosen"] else ""
+        lines.append(
+            f"  {names[eye]:>9}: error {r['error_px']:.0f} px, temblor {r['jitter_px']:.1f} px; cursor: desvío"
+            f" {r['cursor_bias_px']:.0f} px, jitter {r['cursor_jitter_px']:.1f} px{mark}"
+        )
     return "\n".join(lines)
 
 

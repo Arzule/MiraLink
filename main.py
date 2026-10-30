@@ -141,6 +141,16 @@ def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
     dialog.finished.connect(app.quit)
     dialog.show()
     app.exec()
+    mapper = getattr(dialog, "accepted_mapper", None)
+    eye = getattr(mapper, "eye", None)
+    if eye is not None:  # "Aceptar": el ojo elegido queda en config.json (tracking.selected_eye)
+        from config_manager import save_selected_eye
+
+        try:
+            save_selected_eye(eye)
+            print(f"Ojo usado guardado en config.json: {eye}")
+        except (OSError, ValueError) as e:
+            print(f"No se pudo guardar el ojo en config.json: {e}")
     saved = list(getattr(dialog, "saved_sessions", []))
     if saved:
         for path in saved:

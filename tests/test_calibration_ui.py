@@ -11,7 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 import calibration_ui as cui
-from calibration import CalibrationSession, load_calibration, screen_geometry_from_qt
+from calibration import HEAD_MOTION_STEPS, CalibrationSession, load_calibration, screen_geometry_from_qt
 from config_manager import DEFAULT_CONFIG
 from eye_tracker import TrackingFrame
 from test_calibration import synth_features
@@ -486,9 +486,9 @@ class TestRecordSession(UITestBase):
             self.assertEqual(set(sess.point[sess.capture_mask("validation")].tolist()), set(range(5)))
             # fase de movimiento de cabeza al final (solo en --record-session), mirando el centro
             head = sess.stage == 2
-            self.assertEqual(set(sess.point[head & (sess.phase == 1)].tolist()), set(range(4)))
+            self.assertEqual(set(sess.point[head & (sess.phase == 1)].tolist()), set(range(len(HEAD_MOTION_STEPS))))
             np.testing.assert_allclose(sess.target[head][0], [geom["width"] / 2, geom["height"] / 2])
-            self.assertEqual([s[0] for s in sess.meta["head_motion_steps"]], ["still", "yaw", "pitch", "depth"])
+            self.assertEqual([s[0] for s in sess.meta["head_motion_steps"]], [k for k, _t, _s in HEAD_MOTION_STEPS])
             self.assertTrue(os.path.isfile(os.path.join(d, "calibration.json")))  # Aceptar también calibra
 
     def test_cancelled_run_is_saved_too(self):

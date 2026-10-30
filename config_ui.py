@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config_manager import camera_size, load_config, save_config
+from config_manager import camera_size, load_config, save_config, save_selected_eye
 from theme_manager import list_themes, load_theme
 
 logger = logging.getLogger(__name__)
@@ -435,11 +435,28 @@ class ConfigWindow(QMainWindow):
         if dialog is None:
             return
         logger.info("Modal de calibración cerrado")
-        if getattr(dialog, "accepted_mapper", None) is not None:
+        mapper = getattr(dialog, "accepted_mapper", None)
+        if mapper is not None:
             self.save_label.setText("Calibración guardada")
             self._save_label_timer.start(2500)
+            self._store_selected_eye(getattr(mapper, "eye", None))
         if hasattr(dialog, "deleteLater"):
             dialog.deleteLater()
+
+    def _store_selected_eye(self, eye):
+        """Guarda en config.json (tracking.selected_eye) el ojo de la calibración aceptada, sin guardar de
+        paso otros cambios de la ventana; también lo refleja en la configuración en memoria."""
+        if eye is None:
+            return
+        try:
+            save_selected_eye(eye, self.config_path)
+        except (OSError, ValueError) as e:
+            logger.exception("No se pudo guardar el ojo elegido en config.json")
+            self.save_label.setText(f"Calibración guardada, pero no se pudo escribir el ojo en config.json: {e}")
+            self._save_label_timer.start(4000)
+            return
+        self._config.setdefault("tracking", {})["selected_eye"] = eye
+        logger.info("Ojo elegido guardado en config.json: %s", eye)
 
     def _on_camera_selected(self, index):
         self._config.setdefault("camera", {})["device_index"] = int(index)

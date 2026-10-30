@@ -32,10 +32,17 @@ DEFAULT_CONFIG = {
         "feature_median_window": 3,
         "deadzone_px": 4,
     },
+    # eye: con qué ojo se sigue la mirada y se detectan los parpadeos. "auto" = en cada calibración se elige
+    # el de menor temblor (entre los de error parecido); "right"/"left"/"both" lo fuerzan.
+    # selected_eye: el ojo de la última calibración aceptada (lo escribe la aplicación; null = ninguna)
+    "tracking": {"eye": "auto", "selected_eye": None},
     "ui": {"theme": "default", "font_scale": 1.0},
     "overlay": {"buttons": {}},
     "tts": {"enabled": False},
 }
+
+EYE_MODES = ("auto", "both", "right", "left")  # como calibration.EYE_MODES (sin importar numpy aquí)
+SELECTED_EYES = ("both", "right", "left")
 
 
 def _get_project_root():
@@ -153,6 +160,15 @@ def _validate_config(config):
 
     validated["interaction"] = inter
 
+    # tracking: modo del ojo y ojo de la última calibración
+    if not isinstance(validated.get("tracking", {}), dict):
+        validated["tracking"] = {}
+    tracking = validated.setdefault("tracking", {})
+    if tracking.get("eye") not in EYE_MODES:
+        tracking["eye"] = DEFAULT_CONFIG["tracking"]["eye"]
+    if tracking.get("selected_eye") not in SELECTED_EYES:
+        tracking["selected_eye"] = None
+
     # ui
     if not isinstance(validated.get("ui", {}), dict):
         validated["ui"] = {}
@@ -228,3 +244,25 @@ def save_config(config, path=None):
 
     os.replace(tmp_path, path)
     return validated
+
+
+def eye_mode(config) -> str:
+    """Modo del ojo de config.json (tracking.eye): auto, both, right o left."""
+    tracking = config.get("tracking", {}) if isinstance(config, dict) else {}
+    mode = tracking.get("eye", "auto") if isinstance(tracking, dict) else "auto"
+    return mode if mode in EYE_MODES else "auto"
+
+
+def save_selected_eye(eye, path=None):
+    """Escribe tracking.selected_eye en config.json leyendo el archivo actual, para no guardar de paso otros
+    cambios de la ventana que el usuario no haya guardado. Devuelve la configuración guardada."""
+    if eye not in SELECTED_EYES:
+        raise ValueError(f"ojo desconocido: {eye}")
+    if path is None:
+        path = os.path.join(_get_project_root(), "config.json")
+    if os.path.exists(path):  # un config.json ilegible no se pisa con los valores por defecto
+        with open(path, "r", encoding="utf-8") as f:
+            json.load(f)
+    config = load_config(path)
+    config.setdefault("tracking", {})["selected_eye"] = eye
+    return save_config(config, path)
