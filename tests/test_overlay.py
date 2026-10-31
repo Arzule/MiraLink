@@ -193,6 +193,9 @@ class FakeOverlay:
     def target_rects(self):
         return [(0.0, 0.0, 10.0, 10.0)] if self.visible else []
 
+    def set_view(self, rect, zoom):
+        self.view = (rect, zoom)
+
 
 class FakeActions:
     def __init__(self, dry_run):
@@ -242,16 +245,16 @@ class TestOverlayInControlSession(Base):
         self.assertTrue(bar.visible)
         messages = []
         s.overlay_message.connect(messages.append)
-        bar.on_action("zoom_in")
-        self.assertEqual(self.action_objs[0].done, ["zoom_in"])
+        bar.on_action("keyboard")
+        self.assertEqual(self.action_objs[0].done, ["keyboard"])
         self.assertTrue(self.action_objs[0].dry_run)
-        self.assertEqual(messages, ["hecho zoom_in"])
+        self.assertEqual(messages, ["hecho keyboard"])
         s.stop()
         self.assertFalse(bar.visible)
         self.assertTrue(bar.deleted)
         self.assertIsNone(s.overlay)
-        bar.on_action("zoom_out")  # tras detener, un clic tardío no hace nada
-        self.assertEqual(self.action_objs[0].done, ["zoom_in"])
+        bar.on_action("keyboard")  # tras detener, un clic tardío no hace nada
+        self.assertEqual(self.action_objs[0].done, ["keyboard"])
 
     def test_disabled_overlay_is_not_created(self):
         s = self.make_overlay_session(enabled=False)

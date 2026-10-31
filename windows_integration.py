@@ -6,8 +6,9 @@ la Lupa ni Configuración.
 
 - Teclado en pantalla: abre osk.exe con ShellExecute (os.startfile; CreateProcess falla porque osk.exe
   pide uiAccess) o lo cierra si ya está abierto (WM_CLOSE a su ventana "OSKMainClass").
-- Lupa: Win + "+" del teclado numérico acerca (y abre la Lupa si no estaba), Win + "-" aleja. Se usan
-  las teclas del teclado numérico (VK_ADD / VK_SUBTRACT) para no depender de la distribución del teclado.
+- Lupa de Windows: Win + "+" del teclado numérico acerca (y la abre), Win + "-" aleja (VK_ADD /
+  VK_SUBTRACT, sin depender de la distribución). Los botones "Acercar"/"Alejar" YA NO la usan: con ella el
+  cursor iba a la pantalla sin ampliar; usan la lupa propia (magnifier.py). Se conservan para comparar.
 - Filtros de color: Win + Ctrl + C los alterna, pero Windows solo atiende ese atajo si el usuario lo
   activó en Configuración (HKCU\\Software\\Microsoft\\ColorFiltering, HotkeyEnabled = 1). Si no, se abre
   ms-settings:easeofaccess-colorfilter para que lo active (no se cambia el registro por él).

@@ -7,13 +7,16 @@ fábricas inyectables para poder probar la orquestación sin hardware.
 está abierta, los cuadros van a ella y el cursor no se mueve.
 
 Botones flotantes (overlay_buttons, etapa 5): solo existen mientras el control está en marcha; se ocultan
-en pausa y durante Recentrar. Sus rectángulos alimentan el radio magnético del CursorController y sus
-acciones (Lupa, teclado, filtro de color) las ejecuta windows_integration.WindowsActions.
+en pausa y durante Recentrar. Sus rectángulos alimentan el radio magnético del CursorController; el
+teclado y el filtro de color los ejecuta windows_integration.WindowsActions y "Acercar"/"Alejar" la
+lupa propia (magnifier): el cursor va a lo que se ve ampliado, mirar los bordes desplaza la vista y la
+barra se mantiene dentro de la zona visible. Pausar, Recentrar, detener o un fallo devuelven el zoom a 1x.
 """
 
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import logging
 import time
 from typing import Callable, Optional, Tuple
@@ -93,6 +96,7 @@ class ControlSession(QObject):
         overlay_config_getter: Callable[[], dict] = lambda: {"enabled": False},  # config.json overlay
         overlay_factory: Optional[Callable[..., object]] = None,  # (pantalla, config, on_action) -> barra
         actions_factory: Optional[Callable[[bool], object]] = None,  # (dry_run) -> WindowsActions
+        magnifier_factory: Optional[Callable[[], object]] = None,  # -> backend con apply(zoom, x, y) y close()
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -113,6 +117,11 @@ class ControlSession(QObject):
         self._actions_factory = actions_factory
         self.overlay = None
         self.actions = None
+        self._magnifier_factory = magnifier_factory
+        self.magnifier = None  # backend de la lupa, creado al primer zoom
+        self.zoom_view = None  # magnifier.ZoomView de la pantalla del control
+        self.zoomed_mouse = None
+        self._last_frame_ts: Optional[float] = None
         # Ctrl+Alt+R real solo si el atajo de pausa también es el real (los tests nunca registran el real)
         if recenter_hotkey_factory is None and hotkey_factory is None:
             recenter_hotkey_factory = default_recenter_hotkey
@@ -192,6 +201,12 @@ class ControlSession(QObject):
             self._start_recenter_hotkey()
 
             self.mouse = (self._mouse_factory or (DryRunMouse if self.dry_run else PyAutoGUIMouse))()
+            from magnifier import ZoomedMouse, ZoomView
+
+            # lupa propia: sin zoom ZoomedMouse no cambia nada; con zoom lleva el cursor a lo que se ve
+            self.zoom_view = ZoomView(geom["width"], geom["height"])
+            self.zoom_view_primary = (geom["x"], geom["y"]) == (0, 0)  # la ampliación de Windows es del principal
+            self.zoomed_mouse = ZoomedMouse(self.mouse, self.zoom_view, (geom["x"], geom["y"]))
             if self._feedback_factory is None:
                 from cursor_feedback import CursorFeedback
 
@@ -200,7 +215,7 @@ class ControlSession(QObject):
             self._create_overlay(screen)
             self.controller = CursorController(
                 mapper,
-                self.mouse,
+                self.zoomed_mouse,
                 geom["width"],
                 geom["height"],
                 origin=(geom["x"], geom["y"]),
@@ -261,8 +276,15 @@ class ControlSession(QObject):
         self.overlay = overlay_factory(screen, cfg, self._on_overlay_action)
 
     def _snap_targets(self):
+        """Botones en las coordenadas del cursor (lo que se ve: con zoom, ampliados y desplazados)."""
         overlay = self.overlay
-        return overlay.target_rects() if overlay is not None else []
+        if overlay is None:
+            return []
+        rects = overlay.target_rects()
+        view = self.zoom_view
+        if view is not None and view.active:
+            rects = [view.rect_to_display(r) for r in rects]
+        return rects
 
     def _sync_overlay(self):
         """Visible solo con el control en marcha, sin pausa y sin la pantalla de Recentrar."""
@@ -278,8 +300,96 @@ class ControlSession(QObject):
         if self.actions is None or not self.running:
             return
         logger.info("Botón flotante: %s", action)
-        message = self.actions.run(action)
+        if action in ("zoom_in", "zoom_out"):
+            message = self.change_zoom(+1 if action == "zoom_in" else -1)
+        else:
+            message = self.actions.run(action)
         self.overlay_message.emit(message)
+
+    # ------------------------------------------------------------------- lupa
+    @property
+    def zoom(self) -> float:
+        return self.zoom_view.zoom if self.zoom_view is not None else 1.0
+
+    def change_zoom(self, step: int) -> str:
+        """Acercar (+1) o alejar (-1) con la lupa de MiraLink. Devuelve el mensaje para la interfaz."""
+        view = self.zoom_view
+        if view is None or not self.running:
+            return "Inicia el control del cursor para usar la lupa."
+        if not getattr(self, "zoom_view_primary", True):
+            return "La lupa solo funciona en la pantalla principal."
+        changed = view.zoom_in() if step > 0 else view.zoom_out()
+        if not changed:
+            return f"Lupa: zoom {view.zoom:g}x ({'máximo' if step > 0 else 'sin zoom'})."
+        if not self._apply_view():
+            return "No se pudo cambiar el zoom; se volvió a 1x."
+        return f"Lupa: zoom {view.zoom:g}x" + (" · mira un borde para desplazar la vista" if view.active else "")
+
+    def _apply_view(self) -> bool:
+        """Aplica el zoom y la zona visible al sistema, recoloca la barra y el cursor. False si falló."""
+        view = self.zoom_view
+        if view is None:
+            return False
+        try:
+            if self.magnifier is None:
+                if view.active or self._magnifier_factory is not None:
+                    self.magnifier = self._new_magnifier()
+            if self.magnifier is not None:
+                self.magnifier.apply(view.zoom, view.ox, view.oy)
+        except Exception as e:  # noqa: BLE001 - sin lupa se sigue sin zoom
+            logger.exception("No se pudo aplicar el zoom")
+            view.reset()
+            self._close_magnifier()
+            self.overlay_message.emit(f"No se pudo usar la lupa: {e}")
+            return False
+        if self.overlay is not None and hasattr(self.overlay, "set_view"):
+            self.overlay.set_view(view.view_rect() if view.active else None, view.zoom)
+        if self.zoomed_mouse is not None:
+            self.zoomed_mouse.refresh()
+        return True
+
+    def _new_magnifier(self):
+        if self._magnifier_factory is not None:
+            return self._magnifier_factory()
+        from magnifier import FakeMagnification, MagnificationApi
+
+        return FakeMagnification() if self.dry_run else MagnificationApi()  # --dry-run no amplía la pantalla
+
+    def reset_zoom(self):
+        """Vuelve a 1x (pausa, Recentrar, detener, fallo). Siempre seguro de llamar."""
+        view = self.zoom_view
+        if view is not None and view.reset():
+            logger.info("Lupa: zoom restablecido a 1x")
+            self._apply_view()
+
+    def _close_magnifier(self):
+        mag, self.magnifier = self.magnifier, None
+        if mag is not None:
+            try:
+                mag.close()
+            except Exception:  # noqa: BLE001
+                logger.exception("No se pudo cerrar la lupa")
+
+    def _update_zoom_pan(self, frame):
+        """Con zoom, mirar una franja del borde desplaza la vista (no sobre los botones flotantes)."""
+        ts = float(frame.timestamp)
+        dt = 0.0 if self._last_frame_ts is None else max(0.0, ts - self._last_frame_ts)
+        self._last_frame_ts = ts
+        view, ctrl = self.zoom_view, self.controller
+        if view is None or not view.active or ctrl is None:
+            return
+        gaze = None if ctrl._frozen or ctrl.display is None else ctrl.display
+        blocked = ctrl._snapped is not None  # mirando (o yendo a) un botón flotante: no desplazar
+        if view.update_pan(gaze, dt, blocked=blocked):
+            self._apply_view()
+
+    def _desktop_snapshot(self, snap):
+        """El indicador del cursor es una ventana: con zoom se coloca en el punto del escritorio que se ve."""
+        view = self.zoom_view
+        if view is None or not view.active or self.zoomed_mouse is None:
+            return snap
+        x, y = self.zoomed_mouse.desktop_point(snap.x, snap.y)
+        return dataclasses.replace(snap, x=x, y=y)
 
     def _start_recenter_hotkey(self):
         """Ctrl+Alt+R no es de seguridad: si no se puede registrar, se avisa y queda el botón."""
@@ -310,6 +420,7 @@ class ControlSession(QObject):
         screen = self._target_screen()
         geom = screen_geometry_from_qt(screen)
         self.controller.release_all()  # un hold activo se suelta antes de recentrar
+        self.reset_zoom()  # el punto central de Recentrar se dibuja sin ampliar
         factory = self._recenter_screen_factory
         if factory is None:
             from calibration_ui import RecenterScreen
@@ -374,11 +485,12 @@ class ControlSession(QObject):
             return
         try:
             snap = self.controller.update(frame)
+            self._update_zoom_pan(frame)
         except Exception as e:  # noqa: BLE001 - ante cualquier fallo, soltar y detener
             self._fail(f"Error en el control del cursor: {e}")
             return
         if self.feedback is not None:
-            self.feedback.update_snapshot(snap)
+            self.feedback.update_snapshot(self._desktop_snapshot(snap))
 
     def _check_camera(self, frame):
         """Resolución y fps reales de la cámara para la etiqueta de estado (cada 5 s como mucho)."""
@@ -446,6 +558,8 @@ class ControlSession(QObject):
         if self.controller is None:
             return
         self.controller.set_paused(paused)
+        if self.controller.paused:
+            self.reset_zoom()  # en pausa la pantalla vuelve a 1x (Ctrl+Alt+P también quita el zoom)
         if self.feedback is not None:
             self.feedback.update()
         self._sync_overlay()
@@ -463,6 +577,7 @@ class ControlSession(QObject):
                 self.controller.release_all()
         except Exception:  # noqa: BLE001
             pass
+        self._close_magnifier()  # nunca dejar la pantalla ampliada al salir
 
     def stop(self):
         """Detiene todo y suelta siempre el botón del mouse. Idempotente."""
@@ -474,6 +589,10 @@ class ControlSession(QObject):
             if self.controller is not None:
                 self.controller.release_all()
         finally:
+            if self.zoom_view is not None:
+                self.zoom_view.reset()
+            self._close_magnifier()  # la pantalla vuelve siempre a 1x
+            self._last_frame_ts = None
             tracker, self.tracker = self.tracker, None
             if tracker is not None:
                 try:

@@ -64,7 +64,8 @@ class OverlayBar(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.NoFocus)
-        self.setStyleSheet(STYLE % {"font": max(10, round(self.button_size / 9))})
+        self.scale = 1.0  # 1 / zoom de la lupa de MiraLink: con zoom la barra se reduce para verse igual
+        self._view: Optional[Tuple[float, float, float, float]] = None  # zona visible (px físicos) o None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACING)
@@ -74,11 +75,10 @@ class OverlayBar(QWidget):
             btn.setObjectName("overlayButton")
             btn.setAccessibleName(name)
             btn.setFocusPolicy(Qt.NoFocus)
-            btn.setFixedSize(self.button_size, self.button_size)
             btn.clicked.connect(lambda _checked=False, a=action: self.action_triggered.emit(a))
             layout.addWidget(btn)
             self.buttons[action] = btn
-        self.adjustSize()
+        self._apply_scale()
 
     def screen_target(self):
         if self._screen is not None:
@@ -87,13 +87,38 @@ class OverlayBar(QWidget):
 
         return QGuiApplication.primaryScreen()
 
-    def place(self):
-        """Pega la barra al borde elegido, centrada en vertical (coordenadas lógicas de la pantalla)."""
-        area = self.screen_target().geometry()
+    def _apply_scale(self):
+        size = max(8, int(round(self.button_size * self.scale)))
+        self.setStyleSheet(STYLE % {"font": max(1, round(size / 9))})
+        self.layout().setSpacing(max(1, int(round(SPACING * self.scale))))
+        for btn in self.buttons.values():
+            btn.setFixedSize(size, size)
         self.adjustSize()
-        x = area.right() - self.width() - EDGE_GAP + 1 if self.position == "right" else area.left() + EDGE_GAP
-        y = area.top() + (area.height() - self.height()) // 2
-        self.move(x, y)
+
+    def set_view(self, view_rect: Optional[Tuple[float, float, float, float]], zoom: float = 1.0):
+        """Zona visible de la lupa de MiraLink (px físicos relativos a la pantalla; None = sin zoom): la barra
+        se coloca dentro de ella y se reduce 1/zoom, así se ve en el mismo sitio y del mismo tamaño."""
+        self._view = None if view_rect is None or zoom <= 1.0 else tuple(float(v) for v in view_rect)
+        scale = 1.0 if self._view is None else 1.0 / float(zoom)
+        if scale != self.scale:
+            self.scale = scale
+            self._apply_scale()
+        self.place()
+
+    def place(self):
+        """Pega la barra al borde elegido de la zona visible, centrada en vertical (coordenadas lógicas)."""
+        screen = self.screen_target()
+        area = screen.geometry()
+        left, top, width, height = float(area.left()), float(area.top()), float(area.width()), float(area.height())
+        if self._view is not None:
+            dpr = float(screen.devicePixelRatio()) or 1.0
+            vx, vy, vw, vh = self._view
+            left, top, width, height = left + vx / dpr, top + vy / dpr, vw / dpr, vh / dpr
+        self.adjustSize()
+        gap = EDGE_GAP * self.scale
+        x = left + width - self.width() - gap if self.position == "right" else left + gap
+        y = top + (height - self.height()) / 2.0
+        self.move(int(round(x)), int(round(y)))
 
     def showEvent(self, event):
         self.place()
