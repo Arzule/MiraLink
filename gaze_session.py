@@ -28,7 +28,7 @@ from calibration import (
     AGGREGATES,
     DEFAULT_FIT,
     EYES,
-    FEATURE_SETS,
+    IRIS_FEATURE_SETS,
     MODELS,
     PHASE_CAPTURING,
     PHASE_SETTLING,
@@ -914,7 +914,7 @@ def before_after_variants() -> List[Variant]:
 def model_variants() -> List[Variant]:
     """Parte C: conjuntos de rasgos x modelos x agregación, todos con alpha por CV y el filtro nuevo."""
     out = []
-    for fs in FEATURE_SETS:
+    for fs in IRIS_FEATURE_SETS:
         for model in MODELS:
             for agg in AGGREGATES:
                 opts = {"feature_set": fs, "model": model, "alpha": "cv", "aggregate": agg}

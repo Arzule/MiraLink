@@ -4,11 +4,14 @@ Uso:
   .\venv\Scripts\python.exe scripts\neural_gaze_eval.py [sesión.npz ...] [--models mobileone_s0 resnet18 resnet34]
   (por defecto, todas las sesiones de sessions/ grabadas con recortes de la cara)
 
-Cada red estima (giro, inclinación) de la mirada en cada cuadro con el recorte grabado. Esos dos valores
-sustituyen a los del iris (columnas iris_along/iris_perp de los dos ojos) y pasan por el MISMO mapeo de la
-aplicación (DEFAULT_FIT, calibración de 9 puntos) y el mismo filtro del cursor. Métricas por variante:
+Cada red estima (giro, inclinación) de la mirada en cada cuadro con el recorte grabado. Dos variantes:
+- "<red>": esos dos valores sustituyen a los del iris y pasan por el MISMO mapeo (DEFAULT_FIT);
+- "iris+<red>": el híbrido de la aplicación (tracking.gaze_model): iris + red en el mismo mapeo (iris_net),
+  con la mediana de las últimas NET_MEDIAN_WINDOW estimaciones como en eye_tracker.NetGazeStage.
+Mismo filtro del cursor en todas. Métricas por variante:
 - validación: desvío medio en los 5 puntos nuevos (px);
-- cabeza: mediana del error en la fase de movimiento de cabeza (px), lo que se quiere reducir;
+- cabeza: mediana del error en la fase de movimiento de cabeza (px, por cuadro y sin filtro: mezcla el ruido);
+- cabeza filtr.: media por paso del error del cursor ya filtrado en la fase de cabeza (px; el que se nota);
 - jitter: jitter del cursor en la validación (px);
 - S/R h y v: rango entre puntos de calibración / ruido dentro de cada punto (más es mejor);
 - ms/cuadro: inferencia de la red en esta CPU (además de MediaPipe; para 30 fps hay ~33 ms por cuadro).
@@ -34,7 +37,9 @@ for p in (ROOT, os.path.join(ROOT, "scripts")):
 
 import gaze_session as gs  # noqa: E402
 import neural_gaze as ng  # noqa: E402
-from head_compensation_eval import Prepared  # noqa: E402
+from calibration import NET_COLUMNS, gaze_fit_options  # noqa: E402
+from eye_tracker import NET_MEDIAN_WINDOW  # noqa: E402
+from head_compensation_eval import TRANSITION_S, Prepared  # noqa: E402
 
 NO_COMPENSATION = (0.0, 0.0, 0.0, 0.0)
 BATCH = 32
@@ -100,6 +105,52 @@ def with_gaze(session, gaze: np.ndarray):
     return dataclasses.replace(session, features=f)
 
 
+def running_median(gaze: np.ndarray, valid: np.ndarray, window: int = NET_MEDIAN_WINDOW) -> np.ndarray:
+    """Mediana de las últimas `window` estimaciones; se vacía en cuadros sin estimación o sin cara."""
+    out = np.full_like(gaze, np.nan, dtype=float)
+    recent: List[np.ndarray] = []
+    for i in range(len(gaze)):
+        if not (valid[i] and np.isfinite(gaze[i]).all()):
+            recent.clear()
+            continue
+        recent.append(gaze[i])
+        del recent[:-window]
+        out[i] = np.median(recent, axis=0)
+    return out
+
+
+def with_net_columns(session, gaze: np.ndarray, window: int = NET_MEDIAN_WINDOW):
+    """Copia de la sesión con los rasgos del híbrido: los 10 de MediaPipe + [giro, inclinación] de la red."""
+    valid = session.face & np.isfinite(session.features[:, :10]).all(axis=1)
+    med = running_median(gaze, valid, window)
+    f = np.full((len(session), max(NET_COLUMNS) + 1), np.nan)
+    f[:, :10] = session.features[:, :10]
+    f[:, list(NET_COLUMNS)] = med
+    f[~np.isfinite(med).all(axis=1)] = np.nan
+    return dataclasses.replace(session, features=f)
+
+
+def filtered_head_error(prep) -> float:
+    """Media por paso de la fase de cabeza del error del cursor filtrado (CursorController real)."""
+    s = prep.s
+
+    class Wrapped:
+        def predict_one(self, f):
+            p = prep.mapper.predict(np.atleast_2d(f))[0]
+            return float(p[0]), float(p[1])
+
+    cur = gs.simulate_cursor(s, Wrapped())
+    st = s.stage == gs.STAGE_CODES["head"]
+    errs = []
+    for k in np.unique(s.point[st]):
+        cap = st & (s.point == k) & (s.phase == 1)
+        t0 = s.t[np.flatnonzero(cap)[0]]
+        mk = cap & s.valid_mask() & (s.t - t0 >= TRANSITION_S)
+        if mk.sum() >= 5:
+            errs.append(float(np.median(np.linalg.norm(cur[mk] - prep.center, axis=1))))
+    return float(np.mean(errs)) if errs else float("nan")
+
+
 def signal_to_noise(session) -> tuple:
     """Por eje: rango de las medianas de los puntos de calibración / mediana de la desviación dentro del punto."""
     x, _y, g = gs.robust_samples(session, "calibration")
@@ -112,13 +163,14 @@ def signal_to_noise(session) -> tuple:
     return tuple(res)
 
 
-def metrics(session, name: str) -> Dict[str, object]:
-    prep = Prepared(session, name)
+def metrics(session, name: str, fit_options=None) -> Dict[str, object]:
+    prep = Prepared(session, name, fit_options)
     has_head = bool((session.stage == gs.STAGE_CODES["head"]).any()) and len(prep.head_frames()) > 0
     snr_h, snr_v = signal_to_noise(session)
     return {
         "validation_px": prep.validation_error(NO_COMPENSATION),
         "head_px": prep.head_error(NO_COMPENSATION) if has_head else float("nan"),
+        "head_filtered_px": filtered_head_error(prep) if has_head else float("nan"),
         "jitter_px": prep.cursor_jitter(NO_COMPENSATION),
         "snr_h": snr_h,
         "snr_v": snr_v,
@@ -144,6 +196,7 @@ def evaluate_session(path: str, models: Sequence[str], log=print) -> Dict[str, D
         log(f"  {model}: estimando la mirada...")
         pred = cached_prediction(path, s, model, lambda: ng.GazeNet(info.path), log)
         rows[model] = metrics(with_gaze(s, pred), model)
+        rows[f"iris+{model}"] = metrics(with_net_columns(s, pred), f"iris+{model}", gaze_fit_options(model))
     return rows
 
 
@@ -153,11 +206,11 @@ def model_timings(models: Sequence[str]) -> Dict[str, float]:
 
 
 def format_rows(rows: Dict[str, Dict[str, object]], timings: Dict[str, float]) -> str:
-    lines = [f"  {'variante':<15}{'validación':>11}{'cabeza':>9}{'jitter':>9}{'S/R h':>8}{'S/R v':>8}{'válidos':>9}{'ms/cuadro':>11}"]
+    lines = [f"  {'variante':<20}{'validación':>11}{'cabeza':>9}{'cab. filtr.':>12}{'jitter':>9}{'S/R h':>8}{'S/R v':>8}{'válidos':>9}{'ms/cuadro':>11}"]
     for name, r in rows.items():
-        ms = timings.get(name)
+        ms = timings.get(name.replace("iris+", ""))
         lines.append(
-            f"  {name:<15}{r['validation_px']:>9.0f}px{r['head_px']:>7.0f}px{r['jitter_px']:>7.1f}px"
+            f"  {name:<20}{r['validation_px']:>9.0f}px{r['head_px']:>7.0f}px{r['head_filtered_px']:>10.0f}px{r['jitter_px']:>7.1f}px"
             f"{r['snr_h']:>8.1f}{r['snr_v']:>8.1f}{100 * r['valid']:>8.0f}%{(f'{ms:.0f}' if ms else '-'):>11}"
         )
     return "\n".join(lines)

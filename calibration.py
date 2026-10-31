@@ -21,7 +21,12 @@ SUPPORTED_VERSIONS = (1, 2)
 CALIBRATION_FILENAME = "calibration.json"
 WARN_ERROR_PX = 150  # por encima de este error estimado se sugiere repetir
 RAW_FEATURE_DIM = 10  # eye_tracker.FEATURE_NAMES (los vectores viejos de 9 se completan con roll = 0)
-FEATURE_SETS = ("eyes", "compact", "head", "full")
+IRIS_FEATURE_SETS = ("eyes", "compact", "head", "full")  # solo rasgos de MediaPipe
+FEATURE_SETS = IRIS_FEATURE_SETS + ("iris_net",)
+# Mirada por red neuronal (neural_gaze, config.json tracking.gaze_model): el rastreador añade al vector de
+# rasgos [10] giro y [11] inclinación de la red (radianes, mediana de los últimos cuadros). "iris_net" =
+# iris + red en el mismo mapeo (híbrido; sesión 230535: validación 93 -> 33 px, AGENTS.md).
+NET_COLUMNS = (10, 11)
 MODELS = ("linear", "quad", "quad_reduced")
 AGGREGATES = ("samples", "median")
 ALPHA_GRID = (0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0)
@@ -95,6 +100,7 @@ def reduce_features(x: np.ndarray, feature_set: str = "compact", eye: str = "bot
     compact (6): + [nose_x, nose_y, yaw, pitch]
     head (8): compact + [roll, interocular] (compensación completa de la cabeza: giro, posición y escala)
     full (10): los 10 rasgos sin promediar los ojos (ignora `eye`).
+    iris_net (4): [iris_along, iris_perp, giro de la red, inclinación de la red] (NET_COLUMNS).
     """
     x = pad_features(x)
     along, perp = eye_iris(x, eye)
@@ -106,11 +112,15 @@ def reduce_features(x: np.ndarray, feature_set: str = "compact", eye: str = "bot
         return np.column_stack([along, perp, x[:, 4], x[:, 5], x[:, 7], x[:, 8], x[:, 9], x[:, 6]])
     if feature_set == "full":
         return x[:, :RAW_FEATURE_DIM]
+    if feature_set == "iris_net":
+        if x.shape[1] <= max(NET_COLUMNS):
+            raise ValueError("faltan los rasgos de la red de mirada (¿rastreador sin tracking.gaze_model?)")
+        return np.column_stack([along, perp, x[:, NET_COLUMNS[0]], x[:, NET_COLUMNS[1]]])
     raise ValueError(f"feature_set desconocido: {feature_set}")
 
 
 def feature_set_dim(feature_set: str) -> int:
-    return {"eyes": 2, "compact": 6, "head": 8, "full": RAW_FEATURE_DIM}[feature_set]
+    return {"eyes": 2, "compact": 6, "head": 8, "full": RAW_FEATURE_DIM, "iris_net": 4}[feature_set]
 
 
 def _design(z: np.ndarray, model: str) -> np.ndarray:
@@ -304,7 +314,8 @@ class GazeEarModel:
 class GazeMapper:
     """Regresión ridge sobre rasgos normalizados (solo numpy).
 
-    - feature_set: eyes / compact / head / full (reduce_features).
+    - feature_set: eyes / compact / head / full / iris_net (reduce_features).
+    - gaze_model: red de mirada que el rastreador debe ejecutar (neural_gaze.GAZE_MODELS) con iris_net; None si no.
     - eye: both / right / left, el iris que se usa (EYES; lo elige fit_session según tracking.eye).
     - model: linear / quad / quad_reduced (_design).
     - alpha: penalización relativa al número de muestras, o "cv" para elegirla de ALPHA_GRID con
@@ -325,6 +336,7 @@ class GazeMapper:
         clamp: bool = True,
         auto_offset: bool = False,
         eye: str = "both",
+        gaze_model: Optional[str] = None,
     ):
         if feature_set not in FEATURE_SETS:
             raise ValueError(f"feature_set desconocido: {feature_set}")
@@ -334,7 +346,10 @@ class GazeMapper:
             raise ValueError(f"agregación desconocida: {aggregate}")
         if eye not in EYES:
             raise ValueError(f"ojo desconocido: {eye}")
+        if (feature_set == "iris_net") != bool(gaze_model):
+            raise ValueError("iris_net necesita gaze_model (y solo iris_net lo usa)")
         self.feature_set = feature_set
+        self.gaze_model = gaze_model or None
         self.eye = eye
         self.model = model
         self.aggregate = aggregate
@@ -364,6 +379,7 @@ class GazeMapper:
             aggregate=opts["aggregate"],
             auto_offset=bool(opts.get("auto_offset", False)),
             eye=opts.get("eye", "both"),
+            gaze_model=opts.get("gaze_model"),
         )
 
     @property
@@ -551,6 +567,7 @@ class GazeMapper:
             "camera_index": int(camera_index),
             "screen": {k: int(geometry[k]) for k in ("x", "y", "width", "height")},
             "feature_set": self.feature_set,
+            "gaze_model": self.gaze_model,
             "eye": self.eye,
             "model": self.model,
             "aggregate": self.aggregate,
@@ -586,6 +603,9 @@ class GazeMapper:
             eye = data.get("eye", "both")  # las calibraciones anteriores usaban siempre los dos ojos
             if eye not in EYES:
                 raise CalibrationError(f"calibration.json inválido: ojo desconocido ({eye}); calibra de nuevo")
+            gaze_model = data.get("gaze_model")  # solo con iris_net; las calibraciones anteriores no lo tienen
+            if gaze_model is not None and not isinstance(gaze_model, str):
+                raise CalibrationError("calibration.json inválido: gaze_model; calibra de nuevo")
             mapper = cls(
                 data["feature_set"],
                 float(data["alpha"]),
@@ -593,6 +613,7 @@ class GazeMapper:
                 model=data.get("model", "quad"),
                 aggregate=data.get("aggregate", "samples"),
                 eye=eye,
+                gaze_model=gaze_model,
             )
             mapper.alpha_mode = data.get("alpha_mode", "fixed")
             mapper.mean = np.asarray(data["mean"], dtype=float)
@@ -1201,6 +1222,13 @@ class CalibrationSession:
             ear_points=ear_points,
             ear_points_by_eye=by_eye or None,
         )
+
+
+def gaze_fit_options(gaze_model: Optional[str]) -> Optional[dict]:
+    """Opciones de ajuste para la red de config.json (tracking.gaze_model): None = solo iris (DEFAULT_FIT)."""
+    if not gaze_model:
+        return None
+    return {"feature_set": "iris_net", "gaze_model": gaze_model}
 
 
 def fit_result(res: CalibrationResult, options: Optional[dict] = None, eye: str = "both") -> GazeMapper:

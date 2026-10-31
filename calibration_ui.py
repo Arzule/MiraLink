@@ -766,11 +766,11 @@ def default_camera_lister() -> List[int]:
     return list_cameras()
 
 
-def default_tracker_factory(camera_index: int, camera_size=None, camera_exposure: str = "auto"):
+def default_tracker_factory(camera_index: int, camera_size=None, camera_exposure: str = "auto", gaze_model=None):
     from eye_tracker import TrackerThread
 
     # camera_size None = resolución nativa; camera_exposure "auto" o "fast" (config.json camera.exposure)
-    return TrackerThread(camera_index, camera_size=camera_size, camera_exposure=camera_exposure)
+    return TrackerThread(camera_index, camera_size=camera_size, camera_exposure=camera_exposure, gaze_model=gaze_model)
 
 
 def camera_size_from_config(config: dict):
@@ -844,12 +844,16 @@ class CalibrationDialog(QDialog):
         self.saved_sessions: List[str] = []
         self.config = config
         self.camera_lister = camera_lister
+        from config_manager import gaze_model
+
+        self.gaze_model = gaze_model(config)  # tracking.gaze_model: red de mirada del híbrido (None = solo iris)
         if tracker_factory is default_tracker_factory:
             from config_manager import camera_exposure
 
             size = camera_size_from_config(config)
             exposure = camera_exposure(config)
-            tracker_factory = lambda i: default_tracker_factory(i, size, exposure)  # noqa: E731
+            net = self.gaze_model
+            tracker_factory = lambda i: default_tracker_factory(i, size, exposure, net)  # noqa: E731
         self.tracker_factory = tracker_factory
         self._last_camera_status = -1e9
         self.calibration_path = calibration_path or default_calibration_path()
@@ -1055,11 +1059,13 @@ class CalibrationDialog(QDialog):
             session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced", head_motion=head)
             logger.info("Orden de los puntos de calibración: %s", session.order)
             self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
+            from calibration import gaze_fit_options
             from config_manager import eye_mode
 
             scr = CalibrationScreen(
                 session,
                 dpr=float(screen.devicePixelRatio()),
+                fit_options=gaze_fit_options(self.gaze_model),
                 clock=self.clock,
                 recorder=self.recorder,
                 eye_mode=eye_mode(self.config),

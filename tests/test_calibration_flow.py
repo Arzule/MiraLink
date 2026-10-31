@@ -102,12 +102,16 @@ class GazeSource:
         return synth_features(target, self.rng)[0]
 
 
+FACE_LANDMARKS = np.column_stack([np.linspace(0.4, 0.6, 478), np.linspace(0.3, 0.7, 478)])
+
+
 class FakeFaceTracker:
     def __init__(self, gaze):
         self.gaze = gaze
 
     def process(self, image, ts):
         return TrackingFrame(
+            landmarks=FACE_LANDMARKS,
             timestamp=ts,
             face_found=True,
             ear_left=0.3,
@@ -258,6 +262,59 @@ class FlowBase(unittest.TestCase):
         self.pump(150)
         gc.collect()
         self.pump(50)
+
+
+class FakeGazeNet:
+    """Red de mirada falsa: cuenta las llamadas y devuelve un ángulo pequeño con ruido."""
+
+    input_size = 64
+
+    def __init__(self):
+        self.calls = 0
+        self.rng = np.random.default_rng(3)
+
+    def predict(self, faces):
+        self.calls += 1
+        return self.rng.normal(0.0, 0.01, (len(faces), 2))
+
+
+class TestHybridGazeFlow(FlowBase):
+    def test_gaze_model_in_config_calibrates_iris_plus_network(self):
+        import json
+
+        with open(os.path.join(self.tmp.name, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"tracking": {"gaze_model": "mobileone_s0"}}, f)
+        nets, names = [], []
+
+        def net_factory(name):
+            names.append(name)
+            nets.append(FakeGazeNet())
+            return nets[-1]
+
+        def factory(index):
+            t = TrackerThread(
+                index,
+                camera_factory=lambda i: FakeCamera(self.registry, i),
+                tracker_factory=lambda _p: FakeFaceTracker(self.gaze),
+                clock=VirtualClock(),
+                gaze_model="mobileone_s0",
+                net_factory=net_factory,
+            )
+            self.threads.append(t)
+            return t
+
+        win = self.make_window(tracker_factory=factory)
+        self.open_and_start(win)
+        dlg = self.find_dialog()
+        ok = self.wait_until(lambda: win.calibration_dialog is None, timeout_s=30)
+        scr = dlg.calib_screen if dlg is not None else None
+        self.assertTrue(ok, f"msg={scr.session.message if scr else dlg.status_label.text()} fase={scr.session.phase if scr else None}")
+        mapper = load_calibration(self.cal_path, screen_geometry_from_qt(win.screen()))
+        self.assertEqual(mapper.feature_set, "iris_net")
+        self.assertEqual(mapper.gaze_model, "mobileone_s0")
+        self.assertEqual(names, ["mobileone_s0"])
+        self.assertGreater(nets[0].calls, 100)  # la red corrió en cada cuadro del hilo de seguimiento
+        win.close()
 
 
 class TestCalibrationFlow(FlowBase):

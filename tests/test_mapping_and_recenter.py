@@ -77,7 +77,7 @@ class TestFeatureSetsAndModels(unittest.TestCase):
 
     def test_every_combination_fits_known_function(self):
         x, y, groups, _ = make_dataset()
-        for fs in cal.FEATURE_SETS:
+        for fs in cal.IRIS_FEATURE_SETS:
             for model in cal.MODELS:
                 m = GazeMapper(fs, alpha="cv", model=model)
                 metrics = m.fit(x, y, groups)

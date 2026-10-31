@@ -809,6 +809,44 @@ class FpsMeter:
         return (len(self._ts) - 1) / span if len(self._ts) >= 5 and span > 0 else 0.0
 
 
+# Red de mirada (híbrido iris + red, config.json tracking.gaze_model): mediana de las últimas estimaciones
+# (la red tiembla ~3° por cuadro; con la mediana de 5 la validación de la sesión 230535 bajó de 45 a 33 px).
+NET_MEDIAN_WINDOW = 5
+NET_THREADS = 4  # hilos de ONNX Runtime: MediaPipe corre en el mismo hilo de seguimiento
+
+
+class NetGazeStage:
+    """Añade al vector de rasgos [giro, inclinación] de una red de mirada (calibration.NET_COLUMNS).
+
+    `net` tiene predict(caras BGR) -> (n, 2) e input_size (neural_gaze.GazeNet; falsa en tests). La cara
+    sale de la caja de los landmarks del cuadro. Sin cara o si no se puede recortar, el cuadro queda sin
+    rasgos (como sin rostro) y la mediana se vacía.
+    """
+
+    def __init__(self, net, window: int = NET_MEDIAN_WINDOW):
+        self.net = net
+        self._recent: deque = deque(maxlen=max(1, int(window)))
+
+    def apply(self, frame: "TrackingFrame", image: np.ndarray) -> None:
+        if not frame.face_found or frame.features is None or frame.landmarks is None:
+            self._recent.clear()
+            return
+        from neural_gaze import face_input_from_image
+
+        face = face_input_from_image(image, frame.landmarks, self.net.input_size)
+        out = self.net.predict([face])[0] if face is not None else None
+        if out is None or not np.isfinite(out).all():
+            self._recent.clear()
+            frame.face_found = False
+            frame.features = None
+            return
+        self._recent.append(np.asarray(out, dtype=float))
+        feats = np.zeros(FEATURE_DIM)  # la red va siempre en las columnas FEATURE_DIM y FEATURE_DIM + 1
+        base = np.asarray(frame.features, dtype=float)[:FEATURE_DIM]
+        feats[: len(base)] = base
+        frame.features = np.concatenate([feats, np.median(self._recent, axis=0)])
+
+
 class EyeTrackingPipeline:
     """Cámara -> FaceTracker -> BlinkDetector. Los tres se inyectan (versiones falsas en tests).
     `eye` (EYES): ojo cuyo EAR y altura del iris usa el detector de parpadeos (el de la calibración)."""
@@ -821,17 +859,21 @@ class EyeTrackingPipeline:
         clock: Callable[[], float] = time.monotonic,
         blink_model=None,
         eye: str = "both",
+        gaze_net=None,
     ):
         if eye not in EYES:
             raise ValueError(f"ojo desconocido: {eye}")
         self.camera = camera
         self.tracker = tracker
+        self.net_stage = NetGazeStage(gaze_net) if gaze_net is not None else None  # híbrido iris + red
         self.eye = eye
         self.detector = detector or BlinkDetector(gaze_model=blink_model)
         self.clock = clock
         self.fps_meter = FpsMeter()
         describe = getattr(camera, "describe", None)
         self.camera_info = describe() if callable(describe) else ""
+        if gaze_net is not None:  # se ve en "Cámara: ..." del modal y en la etiqueta de estado del control
+            self.camera_info += f" · iris + red {getattr(gaze_net, 'name', '')}".rstrip()
 
     def step(self) -> Optional[TrackingFrame]:
         """Procesa un cuadro. Devuelve None si la cámara no entregó imagen."""
@@ -841,6 +883,8 @@ class EyeTrackingPipeline:
         ts = self.clock()
         frame = self.tracker.process(image, ts)
         frame.image = image
+        if self.net_stage is not None:
+            self.net_stage.apply(frame, image)
         event = self.detector.update(ts, frame_ear(frame, self.eye), frame.face_found, gaze_perp(frame.features, self.eye))
         frame.eyes_closed = self.detector.is_closed
         frame.blink_event = event
@@ -850,6 +894,22 @@ class EyeTrackingPipeline:
 
 
 # ------------------------------------------------------------------ hilo Qt
+def _default_net_factory(name: str):
+    """Carga la red ONNX de neural_gaze.GAZE_MODELS (error legible si no existe o falta el archivo)."""
+    from neural_gaze import GAZE_MODELS, GazeNet
+
+    if name not in GAZE_MODELS:
+        raise ValueError(f"Red de mirada desconocida: {name}")
+    try:
+        return GazeNet(GAZE_MODELS[name].path, threads=NET_THREADS)
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"Falta el modelo de la red de mirada {name}. Descárgalo con: "
+            r".\venv\Scripts\python.exe scripts\download_gaze_models.py "
+            "o pon tracking.gaze_model en \"iris\" en config.json."
+        ) from e
+
+
 def _make_tracker_thread_class():
     from PySide6.QtCore import QThread, Signal
 
@@ -875,8 +935,12 @@ def _make_tracker_thread_class():
             blink_model=None,
             eye: str = "both",
             camera_exposure: str = "auto",
+            gaze_model: Optional[str] = None,
+            net_factory: Optional[Callable[[str], object]] = None,
         ):
             super().__init__(parent)
+            self.gaze_model = gaze_model  # red de mirada (neural_gaze.GAZE_MODELS) o None = solo iris
+            self._net_factory = net_factory or _default_net_factory
             self.camera_index = camera_index
             self.model_path = model_path
             self.blink_model = blink_model  # GazeEarModel de la calibración (o None)
@@ -898,10 +962,13 @@ def _make_tracker_thread_class():
             tracker = None
             try:
                 tracker = self._tracker_factory(self.model_path)
+                net = self._net_factory(self.gaze_model) if self.gaze_model else None
+                if net is not None:
+                    logger.info("Red de mirada cargada: %s", self.gaze_model)
                 camera.open()
                 logger.info("Cámara %s abierta", self.camera_index)
                 pipeline = EyeTrackingPipeline(
-                    camera, tracker, clock=self._clock, blink_model=self.blink_model, eye=self.eye
+                    camera, tracker, clock=self._clock, blink_model=self.blink_model, eye=self.eye, gaze_net=net
                 )
                 misses = 0
                 last_fps_log = None

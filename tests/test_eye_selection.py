@@ -239,10 +239,10 @@ class TestConfigEye(unittest.TestCase):
 
     def test_defaults_and_validation(self):
         cfg = cm.load_config(self.path)
-        self.assertEqual(cfg["tracking"], {"eye": "auto", "selected_eye": None})
+        self.assertEqual(cfg["tracking"], {"eye": "auto", "selected_eye": None, "gaze_model": "iris"})
         self.assertEqual(cm.eye_mode(cfg), "auto")
         bad = cm._validate_config(dict(cfg, tracking={"eye": "center", "selected_eye": "nose"}))
-        self.assertEqual(bad["tracking"], {"eye": "auto", "selected_eye": None})
+        self.assertEqual(bad["tracking"], {"eye": "auto", "selected_eye": None, "gaze_model": "iris"})
         self.assertEqual(cm._validate_config(dict(cfg, tracking="x"))["tracking"]["eye"], "auto")
         self.assertEqual(cm.eye_mode({"tracking": {"eye": "right"}}), "right")
         self.assertEqual(cm.eye_mode({}), "auto")
@@ -255,7 +255,7 @@ class TestConfigEye(unittest.TestCase):
         self.assertEqual(saved["tracking"]["selected_eye"], "left")
         with open(self.path, encoding="utf-8") as f:
             on_disk = json.load(f)
-        self.assertEqual(on_disk["tracking"], {"eye": "auto", "selected_eye": "left"})
+        self.assertEqual(on_disk["tracking"], {"eye": "auto", "selected_eye": "left", "gaze_model": "iris"})
         self.assertEqual(on_disk["interaction"]["smoothing_percent"], 77)
         with self.assertRaises(ValueError):
             cm.save_selected_eye("center", self.path)

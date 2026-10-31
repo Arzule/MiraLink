@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     # eye: con qué ojo se sigue la mirada y se detectan los parpadeos. "auto" = en cada calibración se elige
     # el de menor temblor (entre los de error parecido); "right"/"left"/"both" lo fuerzan.
     # selected_eye: el ojo de la última calibración aceptada (lo escribe la aplicación; null = ninguna)
-    "tracking": {"eye": "auto", "selected_eye": None},
+    "tracking": {"eye": "auto", "selected_eye": None, "gaze_model": "iris"},
     "ui": {"theme": "default", "font_scale": 1.0},
     "overlay": {"buttons": {}},
     "tts": {"enabled": False},
@@ -44,6 +44,8 @@ DEFAULT_CONFIG = {
 
 EYE_MODES = ("auto", "both", "right", "left")  # como calibration.EYE_MODES (sin importar numpy aquí)
 SELECTED_EYES = ("both", "right", "left")
+# Mirada: "iris" (solo MediaPipe) o una red de neural_gaze.GAZE_MODELS combinada con el iris (híbrido)
+GAZE_MODEL_CHOICES = ("iris", "mobileone_s0", "resnet18", "resnet34")
 
 
 def _get_project_root():
@@ -179,6 +181,8 @@ def _validate_config(config):
         tracking["eye"] = DEFAULT_CONFIG["tracking"]["eye"]
     if tracking.get("selected_eye") not in SELECTED_EYES:
         tracking["selected_eye"] = None
+    if tracking.get("gaze_model") not in GAZE_MODEL_CHOICES:
+        tracking["gaze_model"] = DEFAULT_CONFIG["tracking"]["gaze_model"]
 
     # ui
     if not isinstance(validated.get("ui", {}), dict):
@@ -262,6 +266,13 @@ def eye_mode(config) -> str:
     tracking = config.get("tracking", {}) if isinstance(config, dict) else {}
     mode = tracking.get("eye", "auto") if isinstance(tracking, dict) else "auto"
     return mode if mode in EYE_MODES else "auto"
+
+
+def gaze_model(config):
+    """Red de mirada de config.json (tracking.gaze_model) o None si es "iris" (solo MediaPipe)."""
+    tracking = config.get("tracking", {}) if isinstance(config, dict) else {}
+    value = tracking.get("gaze_model", "iris") if isinstance(tracking, dict) else "iris"
+    return value if value in GAZE_MODEL_CHOICES and value != "iris" else None
 
 
 def save_selected_eye(eye, path=None):

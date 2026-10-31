@@ -191,6 +191,7 @@ class GazeNet:
         if threads:
             opts.intra_op_num_threads = threads
         self.session = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.name = os.path.basename(path).replace("_gaze.onnx", "")
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         shape = inp.shape

@@ -38,12 +38,12 @@ TRANSITION_S = gs.HEAD_TRANSITION_S
 class Prepared:
     """Sesión con el mapeo por defecto ajustado y la pose de referencia de la calibración."""
 
-    def __init__(self, session, name: str = ""):
+    def __init__(self, session, name: str = "", fit_options=None):
         self.s = session
         self.name = name
         x, y, g = gs.robust_samples(session, "calibration")
         self.val = gs.robust_samples(session, "validation")
-        self.mapper = GazeMapper.from_fit_options()
+        self.mapper = GazeMapper.from_fit_options(fit_options)
         self.mapper.fit(x, y, g, *self.val)
         self.ref = np.median(pad_features(x)[:, [4, 5, 6, 7, 8]], axis=0)  # nose_x, nose_y, iod, yaw, pitch
         self.ppmm = session.width / float(session.meta["physical_mm"][0])

@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -173,6 +174,137 @@ class TestEvaluation(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "session_x.m.gaze.npy")))
             again = nge.cached_prediction(path, sess, "m", lambda: self.fail("no debe recalcular"))
         np.testing.assert_array_equal(np.isnan(first), np.isnan(again))
+
+
+class SeqNet:
+    """Red falsa que devuelve una secuencia fija de (giro, inclinación)."""
+
+    input_size = 32
+
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+
+    def predict(self, faces):
+        return np.array([self.outputs.pop(0) for _ in faces], dtype=float)
+
+
+class TestHybridIntegration(unittest.TestCase):
+    def face_frame(self, found=True):
+        return TrackingFrame(timestamp=0.0, face_found=found, features=np.arange(FEATURE_DIM, dtype=float) if found else None,
+                             landmarks=make_landmarks() if found else None)
+
+    def test_net_stage_appends_running_median(self):
+        from eye_tracker import NetGazeStage
+
+        stage = NetGazeStage(SeqNet([(0.1, 0.0), (0.3, 0.2), (0.2, 9.0), (5.0, 5.0)]), window=3)
+        img = make_image()
+        outs = []
+        for _ in range(3):
+            f = self.face_frame()
+            stage.apply(f, img)
+            outs.append(f.features)
+        self.assertEqual(outs[0].shape, (FEATURE_DIM + 2,))
+        np.testing.assert_allclose(outs[0][:FEATURE_DIM], np.arange(FEATURE_DIM))
+        np.testing.assert_allclose(outs[0][FEATURE_DIM:], (0.1, 0.0))
+        np.testing.assert_allclose(outs[2][FEATURE_DIM:], (0.2, 0.2))  # mediana de 3: el pico 9.0 no pasa
+        lost = self.face_frame(found=False)
+        stage.apply(lost, img)  # sin cara: se vacía la mediana
+        self.assertIsNone(lost.features)
+        f = self.face_frame()
+        stage.apply(f, img)
+        np.testing.assert_allclose(f.features[FEATURE_DIM:], (5.0, 5.0))
+
+    def test_net_stage_pads_old_feature_vectors_and_drops_bad_output(self):
+        from eye_tracker import NetGazeStage
+
+        stage = NetGazeStage(SeqNet([(0.1, 0.2), (np.nan, 0.0)]))
+        f = TrackingFrame(timestamp=0.0, face_found=True, features=np.ones(9), landmarks=make_landmarks())
+        stage.apply(f, make_image())
+        self.assertEqual(f.features.shape, (FEATURE_DIM + 2,))
+        self.assertEqual(f.features[9], 0.0)
+        bad = self.face_frame()
+        stage.apply(bad, make_image())
+        self.assertFalse(bad.face_found)
+        self.assertIsNone(bad.features)
+
+    def test_pipeline_runs_the_network(self):
+        from eye_tracker import EyeTrackingPipeline
+
+        class Cam:
+            def read(self):
+                return True, make_image()
+
+        class Tracker:
+            def process(inner, image, ts):
+                return TestHybridIntegration.face_frame(self, True)
+
+        pipe = EyeTrackingPipeline(Cam(), Tracker(), clock=lambda: 1.0, gaze_net=SeqNet([(0.3, -0.1)]))
+        frame = pipe.step()
+        np.testing.assert_allclose(frame.features[FEATURE_DIM:], (0.3, -0.1))
+
+    def test_default_net_factory_errors(self):
+        from eye_tracker import _default_net_factory
+
+        with self.assertRaises(ValueError):
+            _default_net_factory("no_existe")
+        missing = ng.GazeModelInfo("x", "no_existe_gaze.onnx", "")
+        with mock.patch.dict(ng.GAZE_MODELS, {"x": missing}):
+            with self.assertRaises(RuntimeError) as ctx:
+                _default_net_factory("x")
+        self.assertIn("download_gaze_models.py", str(ctx.exception))
+
+    def test_iris_net_features_and_mapper_round_trip(self):
+        import calibration as cal
+
+        x = np.random.default_rng(0).normal(0, 0.05, (90, FEATURE_DIM + 2))
+        self.assertEqual(cal.reduce_features(x, "iris_net").shape, (90, 4))
+        np.testing.assert_allclose(cal.reduce_features(x, "iris_net")[:, 2:], x[:, 10:12])
+        with self.assertRaises(ValueError):
+            cal.reduce_features(x[:, :FEATURE_DIM], "iris_net")
+        with self.assertRaises(ValueError):
+            cal.GazeMapper("iris_net")  # sin red
+        with self.assertRaises(ValueError):
+            cal.GazeMapper("eyes", gaze_model="mobileone_s0")
+        self.assertIsNone(cal.gaze_fit_options(None))
+        y = np.column_stack([x[:, 10] * 4000 + 960, x[:, 11] * 4000 + 540])
+        g = np.repeat(np.arange(9), 10)
+        m = cal.GazeMapper.from_fit_options(cal.gaze_fit_options("mobileone_s0"))
+        m.fit(x, y, g)
+        geom = {"x": 0, "y": 0, "width": 1920, "height": 1080}
+        back = cal.GazeMapper.from_dict(m.to_dict(geom), geom)
+        self.assertEqual((back.feature_set, back.gaze_model), ("iris_net", "mobileone_s0"))
+        np.testing.assert_allclose(back.predict(x[:5]), m.predict(x[:5]))
+        old = m.to_dict(geom)
+        old.pop("gaze_model")
+        with self.assertRaises(cal.CalibrationError):
+            cal.GazeMapper.from_dict(old, geom)  # iris_net sin red: recalibrar
+        eyes = cal.GazeMapper.from_fit_options()
+        eyes.fit(x, y, g)
+        legacy = eyes.to_dict(geom)
+        legacy.pop("gaze_model")
+        self.assertIsNone(cal.GazeMapper.from_dict(legacy, geom).gaze_model)  # calibraciones anteriores
+
+    def test_config_gaze_model(self):
+        import config_manager as cm
+
+        self.assertIsNone(cm.gaze_model(cm.DEFAULT_CONFIG))
+        self.assertEqual(cm.gaze_model({"tracking": {"gaze_model": "mobileone_s0"}}), "mobileone_s0")
+        self.assertIsNone(cm.gaze_model({"tracking": {"gaze_model": "otra"}}))
+        bad = cm._validate_config(dict(cm.DEFAULT_CONFIG, tracking={"gaze_model": "otra"}))
+        self.assertEqual(bad["tracking"]["gaze_model"], "iris")
+        self.assertEqual(set(cm.GAZE_MODEL_CHOICES) - {"iris"}, set(ng.GAZE_MODELS))
+
+    def test_eval_running_median_and_hybrid_columns(self):
+        gaze = np.array([[1.0, 0], [3, 0], [2, 0], [np.nan, np.nan], [7, 0]])
+        valid = np.array([True, True, True, True, True])
+        med = nge.running_median(gaze, valid, window=3)
+        np.testing.assert_allclose(med[:3, 0], (1, 2, 2))
+        self.assertTrue(np.isnan(med[3]).all())
+        self.assertEqual(med[4, 0], 7)  # se vació tras el cuadro sin estimación
+        sess = gs.synthesize_session(seed=0)
+        hyb = nge.with_net_columns(sess, np.zeros((len(sess), 2)))
+        self.assertEqual(hyb.features.shape[1], FEATURE_DIM + 2)
+        self.assertEqual(sess.features.shape[1], FEATURE_DIM)
 
 
 @unittest.skipUnless(os.path.exists(ng.GAZE_MODELS["mobileone_s0"].path), "falta models/mobileone_s0_gaze.onnx")

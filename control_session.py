@@ -208,8 +208,9 @@ class ControlSession(QObject):
                 exposure = self.camera_exposure_getter()
                 blink_model = getattr(mapper, "blink_model", None)  # EAR esperado según la altura de la mirada
                 eye = getattr(mapper, "eye", "both")  # los parpadeos se detectan con el ojo de la calibración
+                net = getattr(mapper, "gaze_model", None)  # la red con la que se calibró (híbrido iris + red)
                 factory = lambda i: TrackerThread(  # noqa: E731
-                    i, camera_size=size, blink_model=blink_model, eye=eye, camera_exposure=exposure
+                    i, camera_size=size, blink_model=blink_model, eye=eye, camera_exposure=exposure, gaze_model=net
                 )
             self.tracker = factory(self.camera_index_getter())
             self.tracker.frame_ready.connect(self._on_frame)

@@ -149,6 +149,32 @@ class Base(unittest.TestCase):
         )
 
 
+class TestHybridGazeTracker(Base):
+    def test_tracker_runs_the_network_of_the_calibration(self):
+        from unittest import mock
+
+        from calibration import gaze_fit_options
+
+        x, y, groups, _ = make_dataset()
+        x = np.hstack([np.pad(x, ((0, 0), (0, max(0, 10 - x.shape[1])))), np.random.default_rng(0).normal(0, 0.01, (len(x), 2))])
+        mapper = GazeMapper.from_fit_options(gaze_fit_options("mobileone_s0"))
+        mapper.fit(x, y, groups)
+        save_calibration(self.cal_path, mapper, self.geom)
+        s = self.make_session(dry_run=True)
+        s._tracker_factory = None  # la fábrica real: TrackerThread con la red de la calibración
+        calls = []
+
+        def fake_thread(index, **kw):
+            calls.append(kw)
+            return self.tracker
+
+        with mock.patch("eye_tracker.TrackerThread", fake_thread):
+            ok, msg = s.start()
+        self.assertTrue(ok, msg)
+        self.assertEqual(calls[0]["gaze_model"], "mobileone_s0")
+        s.stop()
+
+
 class TestControlSessionPreconditions(Base):
     def test_requires_calibration(self):
         s = self.make_session()
