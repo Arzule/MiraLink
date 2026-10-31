@@ -105,9 +105,14 @@ def make_session_meta(
 class SessionRecorder:
     """Acumula cuadros con el estado de la sesión de calibración y los guarda en .npz."""
 
-    def __init__(self, meta: Optional[dict] = None, keep_landmarks: bool = True):
+    def __init__(self, meta: Optional[dict] = None, keep_landmarks: bool = True, face_crop_fn: Optional[Callable] = None):
         self.meta = dict(meta or {})
         self.keep_landmarks = keep_landmarks
+        # face_crop_fn(imagen, landmarks) -> (bytes JPEG, (cx, cy, lado)) o None: recortes de la cara para
+        # evaluar redes de mirada sin cámara (neural_gaze.encode_record_crop; inyectado para no importar cv2)
+        self.face_crop_fn = face_crop_fn
+        self._face_jpeg: List[bytes] = []
+        self._face_box: List[Optional[Tuple[float, float, float]]] = []
         self._t: List[float] = []
         self._features: List[Optional[np.ndarray]] = []
         self._face: List[bool] = []
@@ -157,6 +162,11 @@ class SessionRecorder:
         image = getattr(frame, "image", None)
         if image is not None:
             self._image_size = (int(image.shape[1]), int(image.shape[0]))
+        if self.face_crop_fn is not None:
+            lm = getattr(frame, "landmarks", None)
+            crop = self.face_crop_fn(image, lm) if (image is not None and lm is not None and frame.face_found) else None
+            self._face_jpeg.append(crop[0] if crop else b"")
+            self._face_box.append(tuple(map(float, crop[1])) if crop else None)
 
     def camera_meta(self) -> dict:
         """Lo que entregó la cámara: resolución real, formato y fps medidos con timestamps."""
@@ -205,6 +215,12 @@ class SessionRecorder:
                 if lm is not None and lm.shape[0] >= NUM_LANDMARKS:
                     lms[i] = lm[:NUM_LANDMARKS]
             out["landmarks"] = lms
+        if self.face_crop_fn is not None:
+            # JPEG concatenados: el cuadro i ocupa face_jpeg[offsets[i]:offsets[i + 1]] (vacío = sin recorte)
+            sizes = [len(b) for b in self._face_jpeg]
+            out["face_jpeg_offsets"] = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
+            out["face_jpeg"] = np.frombuffer(b"".join(self._face_jpeg), dtype=np.uint8).copy()
+            out["face_box"] = np.array([b if b else (np.nan,) * 3 for b in self._face_box], dtype=np.float32).reshape(n, 3)
         return out
 
     def to_session(self) -> "RecordedSession":
@@ -249,6 +265,9 @@ class RecordedSession:
     matrix: Optional[np.ndarray] = None
     blendshapes: Optional[np.ndarray] = None  # (n, len(EYE_BLENDSHAPES)); no existe en sesiones anteriores
     ear_eyes: Optional[np.ndarray] = None  # (n, 2) EAR derecho e izquierdo; desde la elección del ojo
+    face_jpeg: Optional[np.ndarray] = None  # recortes de la cara (JPEG concatenados); desde la red neuronal
+    face_jpeg_offsets: Optional[np.ndarray] = None  # (n + 1,)
+    face_box: Optional[np.ndarray] = None  # (n, 3) centro x, centro y y lado del recorte en px de la imagen
 
     @classmethod
     def from_arrays(cls, arrays: Dict[str, np.ndarray], meta: dict) -> "RecordedSession":
@@ -268,6 +287,9 @@ class RecordedSession:
             matrix=arrays.get("matrix"),
             blendshapes=arrays.get("blendshapes"),
             ear_eyes=arrays.get("ear_eyes"),
+            face_jpeg=arrays.get("face_jpeg"),
+            face_jpeg_offsets=arrays.get("face_jpeg_offsets"),
+            face_box=arrays.get("face_box"),
         )
 
     def __len__(self) -> int:
@@ -292,6 +314,17 @@ class RecordedSession:
         """(rasgos, objetivos, grupo=punto) de los cuadros de captura válidos."""
         m = self.capture_mask(stage)
         return self.features[m], self.target[m], self.point[m].astype(int)
+
+    @property
+    def has_face_crops(self) -> bool:
+        return self.face_jpeg_offsets is not None and self.face_jpeg is not None and len(self.face_jpeg) > 0
+
+    def face_crop_bytes(self, i: int) -> Optional[np.ndarray]:
+        """JPEG del recorte de la cara del cuadro i (None si no hay)."""
+        if not self.has_face_crops:
+            return None
+        a, b = int(self.face_jpeg_offsets[i]), int(self.face_jpeg_offsets[i + 1])
+        return self.face_jpeg[a:b] if b > a else None
 
     @property
     def has_validation(self) -> bool:

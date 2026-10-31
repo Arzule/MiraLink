@@ -10,3 +10,4 @@ sessions/
 build/
 dist/
 miralink_selftest.txt
+models/*.onnx

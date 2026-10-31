@@ -1108,7 +1108,9 @@ class CalibrationDialog(QDialog):
             config=self.config,
             extra={"screen_name": screen.name()},
         )
-        return SessionRecorder(meta)
+        from neural_gaze import encode_record_crop
+
+        return SessionRecorder(meta, face_crop_fn=encode_record_crop)  # recortes de la cara para evaluar redes
 
     def _save_recording(self, outcome: str) -> Optional[str]:
         """Guarda la sesión grabada (también si se canceló: sirve para analizar el fallo)."""
