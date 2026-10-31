@@ -9,6 +9,7 @@ la Lupa ni Configuración.
 - Lupa de Windows: Win + "+" del teclado numérico acerca (y la abre), Win + "-" aleja (VK_ADD /
   VK_SUBTRACT, sin depender de la distribución). Los botones "Acercar"/"Alejar" YA NO la usan: con ella el
   cursor iba a la pantalla sin ampliar; usan la lupa propia (magnifier.py). Se conservan para comparar.
+- Ir al escritorio: Win + D (como el botón nativo del extremo de la barra de tareas, que no todos conocen).
 - Filtros de color: Win + Ctrl + C los alterna, pero Windows solo atiende ese atajo si el usuario lo
   activó en Configuración (HKCU\\Software\\Microsoft\\ColorFiltering, HotkeyEnabled = 1). Si no, se abre
   ms-settings:easeofaccess-colorfilter para que lo active (no se cambia el registro por él).
@@ -27,6 +28,7 @@ VK_CONTROL = 0x11
 VK_ADD = 0x6B  # "+" del teclado numérico
 VK_SUBTRACT = 0x6D  # "-" del teclado numérico
 VK_C = 0x43
+VK_D = 0x44
 KEYEVENTF_KEYUP = 0x0002
 WM_CLOSE = 0x0010
 
@@ -34,7 +36,7 @@ OSK_WINDOW_CLASS = "OSKMainClass"
 COLOR_FILTER_KEY = r"Software\Microsoft\ColorFiltering"
 COLOR_FILTER_SETTINGS = "ms-settings:easeofaccess-colorfilter"
 
-ACTIONS = ("keyboard", "zoom_in", "zoom_out", "color_filter")
+ACTIONS = ("keyboard", "zoom_in", "zoom_out", "color_filter", "show_desktop")
 
 
 # ------------------------------------------------------------ backends reales
@@ -128,6 +130,7 @@ class WindowsActions:
             "zoom_in": self.zoom_in,
             "zoom_out": self.zoom_out,
             "color_filter": self.toggle_color_filter,
+            "show_desktop": self.show_desktop,
         }.get(action)
         if handler is None:
             raise ValueError(f"acción desconocida: {action}")
@@ -150,6 +153,10 @@ class WindowsActions:
 
     def zoom_out(self) -> str:
         return self._keys((VK_LWIN, VK_SUBTRACT), "Lupa: alejar")
+
+    def show_desktop(self) -> str:
+        """Win + D: muestra el escritorio (el botón solo aparece con una aplicación delante)."""
+        return self._keys((VK_LWIN, VK_D), "Escritorio")
 
     def toggle_keyboard(self) -> str:
         hwnd = self.find_window(OSK_WINDOW_CLASS)

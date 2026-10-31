@@ -47,6 +47,7 @@ from cursor_control import (
 logger = logging.getLogger(__name__)
 
 MSG_NEEDS_CALIBRATION = "Primero calibra el rastreador"
+OVERLAY_CHECK_TICKS = 5  # el temporizador va a 100 ms: la ventana activa se revisa cada 0.5 s (menos CPU)
 MSG_RECENTER_NEEDS_CONTROL = f"Inicia el control del cursor para usar Recentrar ({RECENTER_HOTKEY_LABEL})."
 
 
@@ -98,6 +99,7 @@ class ControlSession(QObject):
         actions_factory: Optional[Callable[[bool], object]] = None,  # (dry_run) -> WindowsActions
         magnifier_factory: Optional[Callable[[], object]] = None,  # -> backend con apply(zoom, x, y) y close()
         foreground_is_desktop: Optional[Callable[[], bool]] = None,  # la barra solo se muestra en el escritorio
+        desktop_button_factory: Optional[Callable[..., object]] = None,  # botón "Ir al escritorio"
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -120,7 +122,10 @@ class ControlSession(QObject):
         self.actions = None
         self._magnifier_factory = magnifier_factory
         self._foreground_is_desktop = foreground_is_desktop
-        self._overlay_shown: Optional[bool] = None
+        self._desktop_button_factory = desktop_button_factory
+        self.desktop_button = None  # sustituye a la barra cuando hay una aplicación delante
+        self._overlay_shown: Optional[Tuple[bool, bool]] = None  # (barra, botón del escritorio) visibles
+        self._timer_ticks = 0
         self.magnifier = None  # backend de la lupa, creado al primer zoom
         self.zoom_view = None  # magnifier.ZoomView de la pantalla del control
         self.zoomed_mouse = None
@@ -277,13 +282,19 @@ class ControlSession(QObject):
 
             overlay_factory = make_overlay
         self.overlay = overlay_factory(screen, cfg, self._on_overlay_action)
+        button_factory = self._desktop_button_factory
+        if button_factory is None:
+            from overlay_buttons import make_desktop_button
+
+            button_factory = make_desktop_button
+        self.desktop_button = button_factory(screen, cfg, self._on_overlay_action)
 
     def _snap_targets(self):
         """Botones en las coordenadas del cursor (lo que se ve: con zoom, ampliados y desplazados)."""
-        overlay = self.overlay
-        if overlay is None:
-            return []
-        rects = overlay.target_rects()
+        rects = []
+        for widget in (self.overlay, self.desktop_button):
+            if widget is not None:
+                rects.extend(widget.target_rects())  # vacío si está oculto
         view = self.zoom_view
         if view is not None and view.active:
             rects = [view.rect_to_display(r) for r in rects]
@@ -301,19 +312,25 @@ class ControlSession(QObject):
             return False
 
     def _sync_overlay(self):
-        """Visible solo con el control en marcha, sin pausa, sin la pantalla de Recentrar y con el escritorio
-        delante (no sobre aplicaciones: taparía su barra de desplazamiento). Lo revisa también el temporizador."""
+        """Con el control en marcha, sin pausa y sin la pantalla de Recentrar: con el escritorio delante la
+        barra; con una aplicación delante (la barra taparía su barra de desplazamiento) solo el botón "Ir al
+        escritorio". Lo revisa también el temporizador (OVERLAY_CHECK_TICKS)."""
         overlay = self.overlay
         if overlay is None:
             self._overlay_shown = None
             return
-        visible = self.running and not self.paused and self.recenter_screen is None and self._desktop_in_front()
-        if visible == self._overlay_shown:
+        active = self.running and not self.paused and self.recenter_screen is None
+        on_desktop = active and self._desktop_in_front()
+        state = (on_desktop, active and not on_desktop)
+        if state == self._overlay_shown:
             return
-        self._overlay_shown = visible
-        overlay.setVisible(visible)
-        if visible:
-            overlay.raise_()
+        self._overlay_shown = state
+        for widget, visible in ((overlay, state[0]), (self.desktop_button, state[1])):
+            if widget is None:
+                continue
+            widget.setVisible(visible)
+            if visible:
+                widget.raise_()
 
     def _on_overlay_action(self, action: str):
         if self.actions is None or not self.running:
@@ -323,6 +340,8 @@ class ControlSession(QObject):
             message = self.change_zoom(+1 if action == "zoom_in" else -1)
         else:
             message = self.actions.run(action)
+        if action == "show_desktop":
+            QTimer.singleShot(400, self, self._sync_overlay)  # Win + D tarda un momento: la barra vuelve ya
         self.overlay_message.emit(message)
 
     # ------------------------------------------------------------------- lupa
@@ -361,8 +380,9 @@ class ControlSession(QObject):
             self._close_magnifier()
             self.overlay_message.emit(f"No se pudo usar la lupa: {e}")
             return False
-        if self.overlay is not None and hasattr(self.overlay, "set_view"):
-            self.overlay.set_view(view.view_rect() if view.active else None, view.zoom)
+        for widget in (self.overlay, self.desktop_button):
+            if widget is not None and hasattr(widget, "set_view"):
+                widget.set_view(view.view_rect() if view.active else None, view.zoom)
         if self.zoomed_mouse is not None:
             self.zoomed_mouse.refresh()
         return True
@@ -560,7 +580,9 @@ class ControlSession(QObject):
     def _on_timer(self):
         if self.controller is not None:
             self.controller.tick(self.clock())
-        self._sync_overlay()  # aparece o se oculta al pasar del escritorio a una aplicación
+        self._timer_ticks += 1
+        if self._timer_ticks % OVERLAY_CHECK_TICKS == 0:
+            self._sync_overlay()  # barra o botón del escritorio según la ventana activa (2 veces por segundo)
 
     def _on_tracker_failed(self, message: str):
         self._fail(f"Se detuvo el seguimiento: {message}")
@@ -635,10 +657,12 @@ class ControlSession(QObject):
                 feedback.hide()
                 feedback.deleteLater()
             overlay, self.overlay = self.overlay, None
+            button, self.desktop_button = self.desktop_button, None
             self._overlay_shown = None
-            if overlay is not None:
-                overlay.hide()
-                overlay.deleteLater()
+            for widget in (overlay, button):
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
             self.actions = None
         if was_running:
             self.tracker_active_changed.emit(False)

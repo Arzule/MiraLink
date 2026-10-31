@@ -26,6 +26,10 @@ OVERLAY_BUTTONS = (
     ("color_filter", "Filtro\nde color", "Activar o desactivar el filtro de color"),
 )
 POSITIONS = ("right", "left")
+# Con una aplicación delante la barra se oculta (taparía su barra de desplazamiento) y aparece solo este
+# botón, separado del borde lo bastante para dejar libre la barra de desplazamiento de la ventana.
+DESKTOP_BUTTON = (("show_desktop", "Ir al\nescritorio", "Ir al escritorio"),)
+DESKTOP_BUTTON_GAP = 40
 EDGE_GAP = 12  # px lógicos entre la barra y el borde de la pantalla
 SPACING = 16
 
@@ -50,8 +54,17 @@ class OverlayBar(QWidget):
 
     action_triggered = Signal(str)
 
-    def __init__(self, screen=None, button_size: int = 180, position: str = "right", parent=None):
+    def __init__(
+        self,
+        screen=None,
+        button_size: int = 180,
+        position: str = "right",
+        parent=None,
+        buttons=OVERLAY_BUTTONS,
+        edge_gap: int = EDGE_GAP,
+    ):
         super().__init__(parent)
+        self.edge_gap = int(edge_gap)
         if position not in POSITIONS:
             raise ValueError(f"posición desconocida: {position}")
         self.position = position
@@ -70,7 +83,7 @@ class OverlayBar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACING)
         self.buttons = {}
-        for action, text, name in OVERLAY_BUTTONS:
+        for action, text, name in buttons:
             btn = QPushButton(text, self)
             btn.setObjectName("overlayButton")
             btn.setAccessibleName(name)
@@ -115,7 +128,7 @@ class OverlayBar(QWidget):
             vx, vy, vw, vh = self._view
             left, top, width, height = left + vx / dpr, top + vy / dpr, vw / dpr, vh / dpr
         self.adjustSize()
-        gap = EDGE_GAP * self.scale
+        gap = self.edge_gap * self.scale
         x = left + width - self.width() - gap if self.position == "right" else left + gap
         y = top + (height - self.height()) / 2.0
         self.move(int(round(x)), int(round(y)))
@@ -147,6 +160,22 @@ def make_overlay(screen=None, config: Optional[dict] = None, on_action: Optional
     """Crea la barra con la configuración de config.json (sección overlay)."""
     cfg = config or {}
     bar = OverlayBar(screen, button_size=int(cfg.get("button_size", 180)), position=cfg.get("position", "right"))
+    if on_action is not None:
+        bar.action_triggered.connect(on_action)
+    return bar
+
+
+def make_desktop_button(screen=None, config: Optional[dict] = None, on_action: Optional[Callable[[str], None]] = None) -> OverlayBar:
+    """Botón "Ir al escritorio" que sustituye a la barra cuando hay una aplicación delante."""
+    cfg = config or {}
+    bar = OverlayBar(
+        screen,
+        button_size=int(cfg.get("button_size", 180)),
+        position=cfg.get("position", "right"),
+        buttons=DESKTOP_BUTTON,
+        edge_gap=DESKTOP_BUTTON_GAP,
+    )
+    bar.setAccessibleName("Botón para ir al escritorio")
     if on_action is not None:
         bar.action_triggered.connect(on_action)
     return bar

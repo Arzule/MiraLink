@@ -226,8 +226,14 @@ class TestOverlayInControlSession(Base):
             self.action_objs.append(FakeActions(dry))
             return self.action_objs[-1]
 
+        def button_factory(screen, cfg, on_action):
+            self.desktop_buttons.append(FakeOverlay(screen, cfg, on_action))
+            return self.desktop_buttons[-1]
+
+        self.desktop_buttons = []
         s.overlay_config_getter = lambda: {"enabled": enabled, "position": "right", "button_size": 180}
         s._overlay_factory = overlay_factory
+        s._desktop_button_factory = button_factory
         s._actions_factory = actions_factory
         s._foreground_is_desktop = lambda: self.desktop  # ventana activa falsa
         self.desktop = True
@@ -258,28 +264,70 @@ class TestOverlayInControlSession(Base):
         bar.on_action("keyboard")  # tras detener, un clic tardío no hace nada
         self.assertEqual(self.action_objs[0].done, ["keyboard"])
 
-    def test_overlay_only_on_the_desktop(self):
+    def tick_check(self, s):
+        """Hasta la siguiente revisión de la ventana activa (cada OVERLAY_CHECK_TICKS ticks de 100 ms)."""
+        import control_session as cs
+
+        for _ in range(cs.OVERLAY_CHECK_TICKS):
+            s._on_timer()
+
+    def test_bar_on_the_desktop_and_desktop_button_over_applications(self):
         s = self.make_overlay_session()
         self.desktop = False  # una aplicación delante: la barra no tapa su barra de desplazamiento
         ok, _ = s.start()
         self.assertTrue(ok)
-        bar = self.overlays[0]
-        self.assertFalse(bar.visible)
-        self.assertEqual(s.controller.snap_targets(), [])  # oculta: sin imán
+        bar, button = self.overlays[0], self.desktop_buttons[0]
+        self.assertEqual((bar.visible, button.visible), (False, True))
+        self.assertEqual(s.controller.snap_targets(), [(0.0, 0.0, 10.0, 10.0)])  # el imán va al botón
         self.desktop = True
-        s._on_timer()  # el temporizador revisa la ventana activa
-        self.assertTrue(bar.visible)
+        s._on_timer()  # entre revisiones no se consulta la ventana activa (menos CPU)
+        self.assertEqual((bar.visible, button.visible), (False, True))
+        self.tick_check(s)
+        self.assertEqual((bar.visible, button.visible), (True, False))
         self.desktop = False
-        s._on_timer()
-        self.assertFalse(bar.visible)
+        self.tick_check(s)
+        self.assertEqual((bar.visible, button.visible), (False, True))
+        s.set_paused(True)  # en pausa, ni barra ni botón
+        self.assertEqual((bar.visible, button.visible), (False, False))
+        s.set_paused(False)
 
         def boom():
             raise OSError("sin acceso")
 
-        s._foreground_is_desktop = boom  # si no se puede saber, no se muestra
-        s._on_timer()
-        self.assertFalse(bar.visible)
+        s._foreground_is_desktop = boom  # si no se puede saber, se trata como una aplicación
+        self.tick_check(s)
+        self.assertEqual((bar.visible, button.visible), (False, True))
         s.stop()
+        self.assertTrue(button.deleted)
+        self.assertIsNone(s.desktop_button)
+
+    def test_desktop_button_goes_to_the_desktop_and_rechecks(self):
+        s = self.make_overlay_session()
+        self.desktop = False
+        s.start()
+        button = self.desktop_buttons[0]
+        button.on_action("show_desktop")
+        self.assertEqual(self.action_objs[0].done, ["show_desktop"])
+        self.desktop = True  # Win + D llevó al escritorio
+        self.assertTrue(self.wait_for(lambda: self.overlays[0].visible, 2.0))  # vuelve sin esperar al tick
+        self.assertFalse(button.visible)
+        s.stop()
+
+    def wait_for(self, cond, timeout):
+        import time
+
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.pump()
+            if cond():
+                return True
+            time.sleep(0.01)
+        return cond()
+
+    def test_show_desktop_action_uses_win_d(self):
+        r = Recorder()
+        self.assertEqual(r.actions().run("show_desktop"), "Escritorio")
+        self.assertEqual(r.keys, [(wi.VK_LWIN, wi.VK_D)])
 
     def test_desktop_window_classes(self):
         from unittest import mock
@@ -297,7 +345,7 @@ class TestOverlayInControlSession(Base):
         s = self.make_overlay_session(enabled=False)
         ok, _ = s.start()
         self.assertTrue(ok)
-        self.assertEqual(self.overlays, [])
+        self.assertEqual((self.overlays, self.desktop_buttons), ([], []))
         self.assertEqual(s.controller.snap_targets(), [])
         s.stop()
 

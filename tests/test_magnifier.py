@@ -133,6 +133,7 @@ class TestZoomInControlSession(Base):
 
         s.overlay_config_getter = lambda: {"enabled": True}
         s._overlay_factory = overlay_factory
+        s._desktop_button_factory = lambda screen, cfg, on_action: FakeOverlay(screen, cfg, on_action)
         s._actions_factory = FakeActions
         s._foreground_is_desktop = lambda: self.desktop  # ventana activa falsa
         self.desktop = True
