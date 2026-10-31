@@ -229,6 +229,8 @@ class TestOverlayInControlSession(Base):
         s.overlay_config_getter = lambda: {"enabled": enabled, "position": "right", "button_size": 180}
         s._overlay_factory = overlay_factory
         s._actions_factory = actions_factory
+        s._foreground_is_desktop = lambda: self.desktop  # ventana activa falsa
+        self.desktop = True
         return s
 
     def test_overlay_only_while_control_is_active(self):
@@ -255,6 +257,41 @@ class TestOverlayInControlSession(Base):
         self.assertIsNone(s.overlay)
         bar.on_action("keyboard")  # tras detener, un clic tardío no hace nada
         self.assertEqual(self.action_objs[0].done, ["keyboard"])
+
+    def test_overlay_only_on_the_desktop(self):
+        s = self.make_overlay_session()
+        self.desktop = False  # una aplicación delante: la barra no tapa su barra de desplazamiento
+        ok, _ = s.start()
+        self.assertTrue(ok)
+        bar = self.overlays[0]
+        self.assertFalse(bar.visible)
+        self.assertEqual(s.controller.snap_targets(), [])  # oculta: sin imán
+        self.desktop = True
+        s._on_timer()  # el temporizador revisa la ventana activa
+        self.assertTrue(bar.visible)
+        self.desktop = False
+        s._on_timer()
+        self.assertFalse(bar.visible)
+
+        def boom():
+            raise OSError("sin acceso")
+
+        s._foreground_is_desktop = boom  # si no se puede saber, no se muestra
+        s._on_timer()
+        self.assertFalse(bar.visible)
+        s.stop()
+
+    def test_desktop_window_classes(self):
+        from unittest import mock
+
+        fake = mock.MagicMock()
+        with mock.patch.dict("sys.modules", {"win32gui": fake}):
+            for cls, expected in (("Progman", True), ("WorkerW", True), ("Shell_TrayWnd", True), ("Chrome_WidgetWin_1", False)):
+                fake.GetForegroundWindow.return_value = 42
+                fake.GetClassName.return_value = cls
+                self.assertEqual(wi.foreground_is_desktop(), expected, cls)
+            fake.GetForegroundWindow.return_value = 0
+            self.assertTrue(wi.foreground_is_desktop())
 
     def test_disabled_overlay_is_not_created(self):
         s = self.make_overlay_session(enabled=False)

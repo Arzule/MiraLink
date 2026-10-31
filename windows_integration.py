@@ -64,6 +64,21 @@ def post_close(hwnd: int) -> None:
     win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
 
 
+# Ventanas del shell que cuentan como "escritorio" (fondo del escritorio y barra de tareas)
+DESKTOP_WINDOW_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+
+
+def foreground_is_desktop() -> bool:
+    """True si la ventana activa es el escritorio (o ninguna): la barra flotante solo se muestra ahí, para
+    no tapar la barra de desplazamiento ni el contenido del borde derecho de las aplicaciones."""
+    import win32gui
+
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return True
+    return win32gui.GetClassName(hwnd) in DESKTOP_WINDOW_CLASSES
+
+
 def read_color_filter_hotkey() -> Optional[bool]:
     """True/False según HotkeyEnabled; None si la clave no existe (nunca se configuró)."""
     import winreg

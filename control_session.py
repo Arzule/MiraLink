@@ -97,6 +97,7 @@ class ControlSession(QObject):
         overlay_factory: Optional[Callable[..., object]] = None,  # (pantalla, config, on_action) -> barra
         actions_factory: Optional[Callable[[bool], object]] = None,  # (dry_run) -> WindowsActions
         magnifier_factory: Optional[Callable[[], object]] = None,  # -> backend con apply(zoom, x, y) y close()
+        foreground_is_desktop: Optional[Callable[[], bool]] = None,  # la barra solo se muestra en el escritorio
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -118,6 +119,8 @@ class ControlSession(QObject):
         self.overlay = None
         self.actions = None
         self._magnifier_factory = magnifier_factory
+        self._foreground_is_desktop = foreground_is_desktop
+        self._overlay_shown: Optional[bool] = None
         self.magnifier = None  # backend de la lupa, creado al primer zoom
         self.zoom_view = None  # magnifier.ZoomView de la pantalla del control
         self.zoomed_mouse = None
@@ -286,12 +289,28 @@ class ControlSession(QObject):
             rects = [view.rect_to_display(r) for r in rects]
         return rects
 
+    def _desktop_in_front(self) -> bool:
+        check = self._foreground_is_desktop
+        if check is None:
+            from windows_integration import foreground_is_desktop
+
+            check = self._foreground_is_desktop = foreground_is_desktop
+        try:
+            return bool(check())
+        except Exception:  # noqa: BLE001 - si no se puede saber, no tapar las aplicaciones
+            return False
+
     def _sync_overlay(self):
-        """Visible solo con el control en marcha, sin pausa y sin la pantalla de Recentrar."""
+        """Visible solo con el control en marcha, sin pausa, sin la pantalla de Recentrar y con el escritorio
+        delante (no sobre aplicaciones: taparía su barra de desplazamiento). Lo revisa también el temporizador."""
         overlay = self.overlay
         if overlay is None:
+            self._overlay_shown = None
             return
-        visible = self.running and not self.paused and self.recenter_screen is None
+        visible = self.running and not self.paused and self.recenter_screen is None and self._desktop_in_front()
+        if visible == self._overlay_shown:
+            return
+        self._overlay_shown = visible
         overlay.setVisible(visible)
         if visible:
             overlay.raise_()
@@ -541,6 +560,7 @@ class ControlSession(QObject):
     def _on_timer(self):
         if self.controller is not None:
             self.controller.tick(self.clock())
+        self._sync_overlay()  # aparece o se oculta al pasar del escritorio a una aplicación
 
     def _on_tracker_failed(self, message: str):
         self._fail(f"Se detuvo el seguimiento: {message}")
@@ -615,6 +635,7 @@ class ControlSession(QObject):
                 feedback.hide()
                 feedback.deleteLater()
             overlay, self.overlay = self.overlay, None
+            self._overlay_shown = None
             if overlay is not None:
                 overlay.hide()
                 overlay.deleteLater()
