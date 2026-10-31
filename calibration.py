@@ -47,7 +47,10 @@ DEFAULT_FIT = {
 EYES = ("both", "right", "left")
 EYE_MODES = ("auto",) + EYES
 EYE_COLUMNS = {"right": (0, 1), "left": (2, 3)}  # (along, perp) en FEATURE_NAMES; ojos del sujeto
-EYE_ERROR_TOLERANCE = 0.15  # candidatos: error <= mejor x (1 + 0.15) + EYE_ERROR_MARGIN_PX
+# candidatos: error <= mejor x (1 + EYE_ERROR_TOLERANCE) + EYE_ERROR_MARGIN_PX. Antes 15 % + 10 px; en la
+# sesión real 043528 (1080p) eso aceptó el ojo derecho con 22 px más de error (116 frente a 94) por 6 px menos
+# de temblor, y el cursor quedó 20 px más desviado. Ahora solo 10 px por encima del mejor.
+EYE_ERROR_TOLERANCE = 0.0
 EYE_ERROR_MARGIN_PX = 10.0
 
 # Pose de la cabeza vigilada para el aviso de deriva: nose_x, nose_y, yaw, pitch (índices de FEATURE_NAMES)
