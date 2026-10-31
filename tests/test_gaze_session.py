@@ -30,14 +30,21 @@ def feed(session, t0, duration, fps=30.0, valid=True):
 
 
 class TestValidationPhase(unittest.TestCase):
-    def test_validation_points_are_new(self):
+    def test_validation_points_form_a_central_rectangle(self):
+        from calibration import CALIBRATION_LAYOUT, CALIBRATION_MARGIN, calibration_points
+
         val = validation_points(W, H)
         self.assertEqual(len(val), 5)
-        grid = grid_points(W, H)
-        for p in val:
-            self.assertTrue(0 < p[0] < W and 0 < p[1] < H)
-            self.assertNotIn(p, grid)
-            self.assertGreater(min(np.hypot(p[0] - g[0], p[1] - g[1]) for g in grid), 0.1 * H)
+        corners = [val[i] for i in (0, 1, 3, 4)]
+        xs, ys = sorted({p[0] for p in corners}), sorted({p[1] for p in corners})
+        self.assertEqual((len(xs), len(ys)), (2, 2))  # 4 esquinas de un rectángulo
+        self.assertAlmostEqual((xs[0] + xs[1]) / 2, W / 2)
+        self.assertAlmostEqual((ys[0] + ys[1]) / 2, H / 2)
+        self.assertEqual(val[2], (W / 2, H / 2))  # y su centro
+        calib = calibration_points(W, H, CALIBRATION_MARGIN, CALIBRATION_LAYOUT)
+        for p in corners:  # las esquinas son puntos nuevos, lejos de la calibración
+            self.assertNotIn(p, calib)
+            self.assertGreater(min(np.hypot(p[0] - g[0], p[1] - g[1]) for g in calib), 0.1 * H)
 
     def test_session_runs_calibration_then_validation(self):
         s = CalibrationSession(W, H, validation=validation_points(W, H))

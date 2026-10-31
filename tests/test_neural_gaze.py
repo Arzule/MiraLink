@@ -319,3 +319,74 @@ class TestRealModel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlowNet:
+    input_size = 32
+    name = "lenta"
+
+    def __init__(self, value=(0.2, -0.1), fail=False):
+        self.value = value
+        self.fail = fail
+        self.calls = 0
+
+    def predict(self, faces):
+        import time
+
+        time.sleep(0.01)
+        self.calls += 1
+        if self.fail:
+            raise ValueError("fallo simulado")
+        return np.array([self.value] * len(faces))
+
+
+class TestAsyncGazeNet(unittest.TestCase):
+    def frame(self):
+        return TrackingFrame(timestamp=0.0, face_found=True, features=np.zeros(FEATURE_DIM), landmarks=make_landmarks())
+
+    def test_network_runs_in_its_own_thread(self):
+        from eye_tracker import AsyncGazeNet, NetGazeStage
+
+        net = AsyncGazeNet(SlowNet())
+        try:
+            stage = NetGazeStage(net)
+            img = make_image()
+            first = self.frame()
+            stage.apply(first, img)  # entrega la cara y vuelve sin esperar a la red
+            self.assertIsNone(first.features)  # aún sin estimación
+            self.assertTrue(net.wait_idle())
+            second = self.frame()
+            stage.apply(second, img)
+            np.testing.assert_allclose(second.features[FEATURE_DIM:], (0.2, -0.1))
+            self.assertEqual(net.name, "lenta")
+        finally:
+            net.close()
+
+    def test_results_from_before_losing_the_face_are_dropped(self):
+        from eye_tracker import AsyncGazeNet, NetGazeStage
+
+        net = AsyncGazeNet(SlowNet())
+        try:
+            stage = NetGazeStage(net)
+            img = make_image()
+            stage.apply(self.frame(), img)
+            stage.apply(TrackingFrame(timestamp=0.0, face_found=False), img)  # se pierde la cara
+            self.assertTrue(net.wait_idle())
+            f = self.frame()
+            stage.apply(f, img)
+            self.assertIsNone(f.features)  # el resultado viejo no cuenta
+        finally:
+            net.close()
+
+    def test_errors_of_the_network_thread_reach_the_tracker(self):
+        from eye_tracker import AsyncGazeNet, NetGazeStage
+
+        net = AsyncGazeNet(SlowNet(fail=True))
+        try:
+            stage = NetGazeStage(net)
+            stage.apply(self.frame(), make_image())
+            net.wait_idle()
+            with self.assertRaises(RuntimeError):
+                stage.apply(self.frame(), make_image())
+        finally:
+            net.close()

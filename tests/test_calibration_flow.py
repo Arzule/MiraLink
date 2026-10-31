@@ -97,7 +97,7 @@ class GazeSource:
         else:
             idx = scr.session.point_index
             self.points_seen.add(idx)
-            px, py = scr.session.points[min(idx, 8)]
+            px, py = scr.session.points[min(idx, scr.session.total - 1)]
             target = np.array([[px / self.geom["width"] * 1920, py / self.geom["height"] * 1080]])
         return synth_features(target, self.rng)[0]
 
@@ -214,10 +214,17 @@ class FlowBase(unittest.TestCase):
                 break
             time.sleep(0.005)
 
+    def press_enter_when_waiting(self):
+        """El usuario pulsa Enter en cada pantalla de la calibración que lo espera (tecla real)."""
+        for scr in self.visible_screens():
+            if scr.session.awaiting_start:
+                QTest.keyClick(scr, Qt.Key_Return)
+
     def wait_until(self, cond, timeout_s=10.0):
         end = time.monotonic() + timeout_s
         while time.monotonic() < end:
             self.app.processEvents()
+            self.press_enter_when_waiting()
             if cond():
                 return True
             time.sleep(0.005)
@@ -336,7 +343,7 @@ class TestCalibrationFlow(FlowBase):
 
         ok = self.wait_until(lambda: win.calibration_dialog is None, timeout_s=30)
         self.assertTrue(ok, f"La calibración no terminó; puntos vistos: {sorted(self.gaze.points_seen)}")
-        self.assertEqual(self.gaze.points_seen, set(range(9)))
+        self.assertEqual(self.gaze.points_seen, set(range(13)))
         self.assertEqual(self.result_dialogs, 1)
         self.assertTrue(os.path.isfile(self.cal_path))
         mapper = load_calibration(self.cal_path, screen_geometry_from_qt(win.screen()))

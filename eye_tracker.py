@@ -815,32 +815,134 @@ NET_MEDIAN_WINDOW = 5
 NET_THREADS = 4  # hilos de ONNX Runtime: MediaPipe corre en el mismo hilo de seguimiento
 
 
+class AsyncGazeNet:
+    """Ejecuta la red de mirada en un hilo propio para no sumar su tiempo al de MediaPipe.
+
+    Con la red en el mismo hilo la cámara bajó de 28.8 a 21 fps (sesión 000755): cada cuadro esperaba a
+    MediaPipe y después a la red. Aquí `submit` entrega una cara si el hilo está libre (si no, ese cuadro
+    no se evalúa) y `take` devuelve los resultados terminados. ONNX Runtime suelta el GIL al calcular, así
+    que la red corre en paralelo con el siguiente cuadro de MediaPipe (llega ~1 cuadro tarde).
+    """
+
+    def __init__(self, net):
+        import threading
+
+        self.net = net
+        self.input_size = net.input_size
+        self.name = getattr(net, "name", "")
+        self._cv = threading.Condition()
+        self._pending = None  # (generación, cara)
+        self._busy = False
+        self._results: List[Tuple[int, np.ndarray]] = []
+        self._error: Optional[BaseException] = None
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, name="red-de-mirada", daemon=True)
+        self._thread.start()
+
+    @property
+    def idle(self) -> bool:
+        with self._cv:
+            return not self._busy and self._pending is None
+
+    def submit(self, generation: int, face: np.ndarray) -> bool:
+        with self._cv:
+            if self._busy or self._pending is not None or self._stop:
+                return False
+            self._pending = (generation, face)
+            self._cv.notify()
+            return True
+
+    def take(self) -> List[Tuple[int, np.ndarray]]:
+        """Resultados terminados desde la última llamada; relanza aquí un error del hilo de la red."""
+        with self._cv:
+            if self._error is not None:
+                raise RuntimeError(f"Falló la red de mirada: {self._error}") from self._error
+            out, self._results = self._results, []
+            return out
+
+    def wait_idle(self, timeout: float = 2.0) -> bool:
+        """Espera a que termine la cara en curso (para tests deterministas)."""
+        with self._cv:
+            return self._cv.wait_for(lambda: not self._busy and self._pending is None, timeout)
+
+    def close(self):
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
+        self._thread.join(timeout=2.0)
+
+    def _run(self):
+        while True:
+            with self._cv:
+                self._cv.wait_for(lambda: self._pending is not None or self._stop)
+                if self._stop:
+                    return
+                generation, face = self._pending
+                self._pending = None
+                self._busy = True
+            try:
+                out = np.asarray(self.net.predict([face])[0], dtype=float)
+            except Exception as e:  # noqa: BLE001 - se relanza en take()
+                with self._cv:
+                    self._error = e
+                    self._busy = False
+                    self._cv.notify_all()
+                return
+            with self._cv:
+                self._results.append((generation, out))
+                self._busy = False
+                self._cv.notify_all()
+
+
 class NetGazeStage:
     """Añade al vector de rasgos [giro, inclinación] de una red de mirada (calibration.NET_COLUMNS).
 
     `net` tiene predict(caras BGR) -> (n, 2) e input_size (neural_gaze.GazeNet; falsa en tests). La cara
     sale de la caja de los landmarks del cuadro. Sin cara o si no se puede recortar, el cuadro queda sin
-    rasgos (como sin rostro) y la mediana se vacía.
+    rasgos (como sin rostro) y la mediana se vacía. Con una AsyncGazeNet (tiene `submit`) la red corre en
+    otro hilo: cada cuadro recoge los resultados terminados, entrega su cara si la red está libre y usa la
+    mediana de las últimas estimaciones; los resultados de antes de perder la cara se descartan
+    (generación) y, hasta el primer resultado, el cuadro queda sin rasgos.
     """
 
     def __init__(self, net, window: int = NET_MEDIAN_WINDOW):
         self.net = net
+        self.is_async = hasattr(net, "submit")
         self._recent: deque = deque(maxlen=max(1, int(window)))
+        self._generation = 0
+
+    def _lose(self, frame: Optional["TrackingFrame"] = None):
+        self._recent.clear()
+        self._generation += 1
+        if frame is not None:
+            frame.face_found = False
+            frame.features = None
 
     def apply(self, frame: "TrackingFrame", image: np.ndarray) -> None:
         if not frame.face_found or frame.features is None or frame.landmarks is None:
-            self._recent.clear()
+            self._lose()
             return
         from neural_gaze import face_input_from_image
 
-        face = face_input_from_image(image, frame.landmarks, self.net.input_size)
-        out = self.net.predict([face])[0] if face is not None else None
-        if out is None or not np.isfinite(out).all():
-            self._recent.clear()
-            frame.face_found = False
-            frame.features = None
-            return
-        self._recent.append(np.asarray(out, dtype=float))
+        if self.is_async:
+            for generation, out in self.net.take():
+                if generation == self._generation and np.isfinite(out).all():
+                    self._recent.append(out)
+            if self.net.idle:
+                face = face_input_from_image(image, frame.landmarks, self.net.input_size)
+                if face is not None:
+                    self.net.submit(self._generation, face)
+            if not self._recent:
+                frame.features = None  # aún sin estimación de la red para esta cara
+                frame.face_found = False
+                return
+        else:
+            face = face_input_from_image(image, frame.landmarks, self.net.input_size)
+            out = self.net.predict([face])[0] if face is not None else None
+            if out is None or not np.isfinite(out).all():
+                self._lose(frame)
+                return
+            self._recent.append(np.asarray(out, dtype=float))
         feats = np.zeros(FEATURE_DIM)  # la red va siempre en las columnas FEATURE_DIM y FEATURE_DIM + 1
         base = np.asarray(frame.features, dtype=float)[:FEATURE_DIM]
         feats[: len(base)] = base
@@ -960,10 +1062,11 @@ def _make_tracker_thread_class():
             logger.info("Hilo de seguimiento: inicio (cámara %s)", self.camera_index)
             camera = self._camera_factory(self.camera_index)
             tracker = None
+            net = None
             try:
                 tracker = self._tracker_factory(self.model_path)
-                net = self._net_factory(self.gaze_model) if self.gaze_model else None
-                if net is not None:
+                if self.gaze_model:
+                    net = AsyncGazeNet(self._net_factory(self.gaze_model))  # en su hilo: no baja los fps
                     logger.info("Red de mirada cargada: %s", self.gaze_model)
                 camera.open()
                 logger.info("Cámara %s abierta", self.camera_index)
@@ -994,6 +1097,8 @@ def _make_tracker_thread_class():
                 logger.info("Cámara %s liberada", self.camera_index)
                 if tracker is not None:
                     tracker.close()
+                if net is not None:
+                    net.close()
                 logger.info("Hilo de seguimiento: fin")
 
         def stop(self, timeout_ms: int = 5000) -> bool:

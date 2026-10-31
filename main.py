@@ -109,7 +109,7 @@ def parse_resolution(args):
 
 
 def run_record_session(dialog_factory=None, record_dir=None, resolution=None):
-    """`--record-session`: calibración de 9 puntos + validación con 5 puntos nuevos, grabando cada cuadro.
+    """`--record-session`: calibración de 13 puntos + validación con 5 puntos nuevos, grabando cada cuadro.
 
     Cada intento (completado o cancelado) se guarda en sessions/session_<fecha>.npz. "Aceptar" también
     guarda calibration.json, como en la calibración normal. `resolution` ((ancho, alto) o "native")

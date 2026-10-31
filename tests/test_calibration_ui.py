@@ -10,6 +10,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
+import calibration as cal
 import calibration_ui as cui
 from calibration import HEAD_MOTION_STEPS, CalibrationSession, load_calibration, screen_geometry_from_qt
 from config_manager import DEFAULT_CONFIG
@@ -229,7 +230,8 @@ class TestCalibrationDialog(UITestBase):
             t = 0.0
             tr = self.trackers[0]
             guard = 0
-            while dlg.calib_screen is not None and guard < 2000:
+            while dlg.calib_screen is not None and guard < 3000:
+                press_enter_if_waiting(scr)
                 px, py = scr.session.current_point
                 geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
                 # rasgos de una función conocida a partir del objetivo en el espacio de ESTA pantalla
@@ -261,11 +263,12 @@ class TestCalibrationDialog(UITestBase):
             screens.append(dlg.calib_screen)
             t = 0.0
             guard = 0
-            while dlg.accepted_mapper is None and guard < 4000:
+            while dlg.accepted_mapper is None and guard < 6000:
                 scr = dlg.calib_screen
                 if scr is not None:
                     if not screens or scr is not screens[-1]:
                         screens.append(scr)
+                    press_enter_if_waiting(scr)
                     geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
                     px, py = scr.session.current_point
                     tgt = np.array([[px / geom["width"] * 1920, py / geom["height"] * 1080]])
@@ -282,6 +285,7 @@ class TestCalibrationDialog(UITestBase):
             self.pump()
             dlg2.start_calibration()
             scr = dlg2.calib_screen
+            press_enter_if_waiting(scr)
             for i in range(400):
                 clock.t += 0.1
                 scr.tick(clock.t)
@@ -293,6 +297,12 @@ class TestCalibrationDialog(UITestBase):
             dlg2.close()
 
 
+def press_enter_if_waiting(scr):
+    """Cada pantalla de la calibración espera Enter (tecla real sobre la pantalla completa)."""
+    if scr is not None and scr.session.awaiting_start:
+        QTest.keyClick(scr, Qt.Key_Return)
+
+
 def QRectFof(container, widget):
     from PySide6.QtCore import QRect
 
@@ -300,9 +310,9 @@ def QRectFof(container, widget):
 
 
 class TestCalibrationScreen(UITestBase):
-    def make_screen(self, w=1280, h=720):
+    def make_screen(self, w=1280, h=720, **session_kw):
         clock = FakeClock()
-        session = CalibrationSession(w, h)
+        session = CalibrationSession(w, h, **session_kw)
         scr = cui.CalibrationScreen(session, dpr=1.0, clock=clock)
         scr.resize(w, h)
         scr.show()
@@ -310,16 +320,21 @@ class TestCalibrationScreen(UITestBase):
         return scr, clock
 
     def test_regions_do_not_overlap_points_or_each_other(self):
-        for w, h in ((1280, 720), (1920, 1080), (1366, 768)):
-            scr, _ = self.make_screen(w, h)
+        # disposición de la aplicación: 13 puntos con margen del 2 %
+        for w, h in ((1280, 720), (1920, 1080), (1366, 768), (2560, 1440)):
+            scr, _ = self.make_screen(w, h, margin=cal.CALIBRATION_MARGIN, layout=cal.CALIBRATION_LAYOUT)
             regions = scr.layout_regions()
+            panel = regions.pop("panel")  # solo se ve mientras espera Enter (sin puntos ni píldora)
+            for name in ("notice", "mini"):
+                self.assertFalse(panel.intersects(regions[name]), f"panel y {name} ({w}x{h})")
             names = list(regions)
             for i in range(len(names)):
                 for j in range(i + 1, len(names)):
                     self.assertFalse(
                         regions[names[i]].intersects(regions[names[j]]), f"{names[i]} y {names[j]} ({w}x{h})"
                     )
-            for k in range(9):
+            self.assertEqual(scr.session.total, 13)
+            for k in range(13):
                 c = scr.logical_point(k)
                 sc = max(0.6, h / 1080.0)
                 # anillos (radio 60*sc) y etiqueta "Mira aquí" (hasta 220*sc a un lado)
@@ -444,16 +459,17 @@ class TestConfigWindowIntegration(UITestBase):
 
 
 class TestRecordSession(UITestBase):
-    """--record-session: 9 puntos + 5 de validación, cada cuadro grabado en sessions/."""
+    """--record-session: 13 puntos + 5 de validación, cada cuadro grabado en sessions/."""
 
     make_dialog = TestCalibrationDialog.make_dialog
 
-    def run_until_closed(self, dlg, clock, rng, max_frames=3000):
+    def run_until_closed(self, dlg, clock, rng, max_frames=4000):
         tr = self.trackers[0]
         geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
         t, n = 0.0, 0
         while dlg.calib_screen is not None and n < max_frames:
             scr = dlg.calib_screen
+            press_enter_if_waiting(scr)
             px, py = scr.session.current_point
             tgt = np.array([[px / geom["width"] * 1920, py / geom["height"] * 1080]])
             clock.t = 100.0 + t
@@ -482,7 +498,8 @@ class TestRecordSession(UITestBase):
             geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
             self.assertEqual(sess.meta["screen"], geom)
             self.assertEqual(len(sess.meta["validation_points"]), 5)
-            self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(9)))
+            self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(13)))
+            self.assertEqual((sess.meta["calibration_layout"], sess.meta["wait_for_start"]), ("grid13", True))
             self.assertEqual(set(sess.point[sess.capture_mask("validation")].tolist()), set(range(5)))
             # fase de movimiento de cabeza al final (solo en --record-session), mirando el centro
             head = sess.stage == 2
@@ -532,6 +549,7 @@ class TestRecordSession(UITestBase):
             scr.resize(w, h)
             regions = scr.layout_regions()
             sc = max(0.6, h / 1080.0)
+            regions.pop("panel")  # solo mientras espera Enter
             for k in range(5):
                 c = scr.logical_validation_point(k)
                 keep_out = QRectF(c.x() - 220 * sc, c.y() - 60 * sc, 440 * sc, 120 * sc)

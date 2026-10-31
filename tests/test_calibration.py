@@ -283,3 +283,60 @@ class TestHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEdgeLayoutAndEnter(unittest.TestCase):
+    """Calibración de la aplicación (31/10): 13 puntos al borde y Enter antes de cada pantalla."""
+
+    def test_grid13_points_at_the_edges_plus_inner_points(self):
+        import calibration as cal
+
+        pts = cal.calibration_points(2560, 1440, cal.CALIBRATION_MARGIN, "grid13")
+        self.assertEqual(len(pts), 13)
+        self.assertEqual(pts[0], (2560 * 0.02, 1440 * 0.02))
+        self.assertEqual(pts[8], (2560 * 0.98, 1440 * 0.98))
+        self.assertEqual(pts[9:], [(640.0, 360.0), (1920.0, 360.0), (640.0, 1080.0), (1920.0, 1080.0)])
+        with self.assertRaises(ValueError):
+            cal.calibration_points(100, 100, layout="otra")
+
+    def test_balanced_order13_interleaves_inner_points(self):
+        import calibration as cal
+
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            order = cal.balanced_order13(rng)
+            self.assertEqual(sorted(order), list(range(13)))
+            self.assertEqual(sorted(order[i] for i in (0, 4, 8, 12)), [9, 10, 11, 12])
+            grid = [i for i in order if i < 9]
+            self.assertTrue(cal.is_balanced_order(grid))
+
+    def test_each_screen_waits_for_enter(self):
+        import calibration as cal
+
+        s = cal.CalibrationSession(W, H, validation=cal.validation_points(W, H), head_motion=cal.HEAD_MOTION_STEPS[:2],
+                                   wait_for_start=True, layout="grid13", margin=cal.CALIBRATION_MARGIN)
+        x = np.zeros(10)
+        self.assertTrue(s.awaiting_start)
+        for t in np.arange(0, 20, 1 / 30):  # sin Enter no avanza, aunque lleguen cuadros
+            s.update(t, x, True)
+        self.assertEqual((s.stage, s.point_index, s.phase), ("calibration", 0, "waiting"))
+        starts = []
+        t = 100.0
+        while not s.finished and t < 400:
+            if s.awaiting_start:
+                starts.append((s.stage, s.active_index))
+                self.assertTrue(s.start_stage())
+                self.assertFalse(s.start_stage())  # un segundo Enter no hace nada
+            s.update(t, x + np.random.default_rng(int(t * 30)).normal(0, 1e-3, 10), True)
+            t += 1 / 30
+        self.assertEqual(s.phase, "done")
+        # una espera por pantalla: calibración, validación y cada paso de cabeza
+        self.assertEqual(starts, [("calibration", 0), ("validation", 0), ("head", 0), ("head", 1)])
+
+    def test_without_wait_for_start_nothing_changes(self):
+        import calibration as cal
+
+        s = cal.CalibrationSession(W, H)
+        self.assertFalse(s.awaiting_start)
+        self.assertFalse(s.start_stage())
+        self.assertEqual(s.phase, "settling")

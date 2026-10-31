@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from calibration import (
+    CALIBRATION_LAYOUT,
+    CALIBRATION_MARGIN,
     HEAD_MOTION_STEPS,
     STAGE_HEAD,
     STAGE_VALIDATION,
@@ -156,7 +158,7 @@ class CameraPreview(QWidget):
 
 # ------------------------------------------------------ pantalla completa
 class CalibrationScreen(QWidget):
-    """Pantalla completa con los 9 puntos. Emite `completed(GazeMapper)` o `aborted(str)`."""
+    """Pantalla completa con los puntos de calibración (13 en la aplicación). Emite `completed(GazeMapper)` o `aborted(str)`."""
 
     completed = Signal(object)
     aborted = Signal(str)
@@ -282,6 +284,13 @@ class CalibrationScreen(QWidget):
                 self.hold.press(self.clock())
             event.accept()
             return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # cada pantalla (calibración, comprobación, cada paso de cabeza) empieza al pulsar Enter
+            if not event.isAutoRepeat() and self.session.start_stage():
+                logger.info("Pantalla de calibración iniciada con Enter: %s", self.session.stage)
+                self.update()
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
@@ -303,31 +312,44 @@ class CalibrationScreen(QWidget):
         return QPointF(x / self.dpr, y / self.dpr)
 
     def layout_regions(self, stage: Optional[str] = None) -> Dict[str, QRectF]:
-        """Zonas de título, aviso ESC y mini previsualización.
+        """Zonas de texto, aviso ESC y mini previsualización.
 
-        Calibración: entre filas de puntos (10/50/90 %), título al 30 % y aviso al 70 %.
-        Validación (puntos al 30/56/70 %; la cuadrícula ya no se dibuja) y movimiento de cabeza (punto
-        central): título arriba (10 %) y aviso abajo (92 %).
+        Calibración (13 puntos: bordes al 2 %, 25/75 % y centro): rótulo al 37.5 % (entre las filas 25 y
+        50 %) y aviso al 62.5 % (entre 50 y 75 %). Validación (rectángulo 35-65 %) y cabeza (punto central):
+        rótulo arriba (10 %) y aviso abajo (92 %). `panel`: tarjeta grande de "Pulsa Enter" mientras la
+        pantalla espera (centrada; en la cabeza, arriba para dejar ver el punto central). `guide`: indicador
+        en vivo de la fase de cabeza, bajo el rótulo o bajo el panel.
         """
         stage = stage or self.session.stage
         w, h = self.width(), self.height()
-        title_h = min(0.24 * h, 170)
-        notice_w = min(w * 0.5, 560)
+        notice_w = min(w * 0.4, 460)
         if stage in (STAGE_VALIDATION, STAGE_HEAD):
-            title_y, band_y = 0.10, 0.92
+            title_y, band_y, title_h = 0.10, 0.92, 0.20 * h  # arriba no hay puntos: cabe instrucción + píldora
         else:
-            title_y, band_y = 0.30, 0.70
-        title = QRectF(w * 0.15, h * title_y - title_h / 2, w * 0.70, title_h)
-        notice = QRectF((w - notice_w) / 2, h * band_y - 32, notice_w, 64)
-        mini = QRectF(w - 24 - 240, h * band_y - 135 / 2, 240, 135)
-        regions = {"title": title, "notice": notice, "mini": mini}
-        if stage == STAGE_HEAD:  # indicador en vivo del giro, bajo el título (lejos del punto central)
-            regions["guide"] = QRectF(w * 0.25, title.bottom() + 8, w * 0.50, 44)
+            title_y, band_y, title_h = 0.375, 0.625, min(0.10 * h, 110)  # solo la píldora, entre filas
+        title = QRectF(w * 0.20, h * title_y - title_h / 2, w * 0.60, title_h)
+        notice = QRectF((w - notice_w) / 2, h * band_y - 30, notice_w, 60)
+        mw, mh = self.mini_size()
+        mini = QRectF(w - 24 - mw, h * band_y - mh / 2, mw, mh)
+        if stage == STAGE_HEAD:
+            panel = QRectF(w * 0.12, h * 0.04, w * 0.76, h * 0.30)
+        else:
+            panel = QRectF(w * 0.12, h * 0.14, w * 0.76, h * 0.42)
+        regions = {"title": title, "notice": notice, "mini": mini, "panel": panel}
+        if stage == STAGE_HEAD:  # indicador en vivo del giro (lejos del punto central)
+            top = panel.bottom() if self.session.awaiting_start else title.bottom()
+            regions["guide"] = QRectF(w * 0.25, top + 8, w * 0.50, 56)
         return regions
+
+    def mini_size(self) -> Tuple[int, int]:
+        """240x135 a 1080 px de alto o más; menor en pantallas bajas (no tapa los puntos de los bordes)."""
+        k = min(1.0, max(0.5, self.height() / 1080.0))
+        return int(240 * k), int(135 * k)
 
     def _place_mini(self):
         m = self.layout_regions()["mini"]
-        self.mini.setGeometry(int(m.x()), int(m.y()), 240, 135)
+        self.mini.setFixedSize(int(m.width()), int(m.height()))  # CameraPreview tiene tamaño fijo
+        self.mini.move(int(m.x()), int(m.y()))
 
     def _sync_layout(self):
         """Recoloca la mini previsualización al pasar de calibración a validación."""
@@ -340,6 +362,17 @@ class CalibrationScreen(QWidget):
         self._place_mini()
 
     # ------------------------------------------------------------------ pintura
+    def stage_texts(self) -> Tuple[str, str, str]:
+        """(título, instrucción, línea secundaria) breves de la pantalla actual."""
+        s = self.session
+        if s.in_head:
+            step = s.head_step
+            n = len(s.head_motion)
+            return f"Cabeza · paso {min(s.head_index + 1, n)} de {n}", step[1] if step else "", "Sigue mirando el punto."
+        if s.in_validation:
+            return "Comprobación", "Mira cada punto nuevo.", ""
+        return "Calibración", "Mira cada punto hasta que se cierre el círculo.", ""
+
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -351,8 +384,9 @@ class CalibrationScreen(QWidget):
 
         validating = s.in_validation
         head = s.in_head
+        waiting = s.awaiting_start and not s.finished
         # puntos inactivos tenues (en validación y en la fase de cabeza no se dibuja la cuadrícula)
-        for i in range(0 if (validating or head) else s.total):
+        for i in range(0 if (validating or head or waiting) else s.total):
             if i == s.point_index and not s.finished:
                 continue
             c = self.logical_point(i)
@@ -363,8 +397,8 @@ class CalibrationScreen(QWidget):
             p.setBrush(col)
             p.drawEllipse(c, 9 * scale + 3, 9 * scale + 3)
 
-        # punto activo con anillos y etiqueta
-        if not s.finished:
+        # punto activo con anillos y etiqueta (mientras espera Enter solo el punto central de la cabeza)
+        if not s.finished and (not waiting or head):
             if head:
                 c = QPointF(s.center[0] / self.dpr, s.center[1] / self.dpr)
             elif validating:
@@ -386,57 +420,21 @@ class CalibrationScreen(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(ACCENT)
             p.drawEllipse(c, 12 * scale, 12 * scale)
-            p.setPen(TEXT)
-            p.setFont(_font(14 * scale, True))
-            label_w = 150 * scale
-            lx = c.x() + 70 * scale if c.x() + 70 * scale + label_w < self.width() else c.x() - 70 * scale - label_w
-            p.drawText(QRectF(lx, c.y() - 20 * scale, label_w, 40 * scale), Qt.AlignVCenter | Qt.AlignLeft, "Mira aquí")
+            if not waiting:
+                p.setPen(TEXT)
+                p.setFont(_font(20 * scale, True))
+                label_w = 190 * scale
+                lx = c.x() + 70 * scale if c.x() + 70 * scale + label_w < self.width() else c.x() - 70 * scale - label_w
+                ly = min(max(c.y() - 24 * scale, 0.0), self.height() - 48 * scale)
+                p.drawText(QRectF(lx, ly, label_w, 48 * scale), Qt.AlignVCenter | Qt.AlignLeft, "Mira aquí")
 
-        # título, subtítulo y píldora
-        t = regions["title"]
-        p.setPen(TEXT)
-        p.setFont(_font(26 * scale, True))
-        title = "Movimiento de cabeza" if head else "Calibrando Rastreador Ocular"
-        p.drawText(QRectF(t.x(), t.y(), t.width(), t.height() * 0.38), Qt.AlignCenter, title)
-        p.setPen(TEXT if head else TEXT_SECONDARY)
-        p.setFont(_font((16 if head else 14) * scale, head))
-        if head:
-            step = s.head_step
-            subtitle = step[1] if step else ""
-        elif validating:
-            subtitle = "Comprobando la precisión con puntos nuevos. Mira cada punto."
+        title, instruction, secondary = self.stage_texts()
+        if waiting:
+            self._paint_start_panel(p, regions["panel"], scale, title, instruction, secondary)
         else:
-            subtitle = "Mira cada punto resaltado hasta que se fije."
-        p.drawText(
-            QRectF(t.x(), t.y() + t.height() * 0.38, t.width(), t.height() * 0.30),
-            Qt.AlignCenter | Qt.TextWordWrap,
-            subtitle,
-        )
-        if head:
-            n_head = len(s.head_motion)
-            action = "Quédate quieto" if s.phase == "capturing" else "Prepárate"
-            pill_text = f"Paso {min(s.head_index + 1, n_head)} de {n_head}: {action}"
-        elif validating:
-            n_val = len(s.validation)
-            pill_text = f"Validación {min(s.validation_index + 1, n_val)} de {n_val}"
-        else:
-            pill_text = f"Punto {min(s.point_index + 1, s.total)} de {s.total}"
-        p.setFont(_font(12 * scale, True))
-        fm = p.fontMetrics()
-        pw = fm.horizontalAdvance(pill_text) + 32
-        ph = fm.height() + 14
-        pill = QRectF(t.center().x() - pw / 2, t.y() + t.height() * 0.70, pw, ph)
-        p.setPen(QPen(BORDER, 1))
-        p.setBrush(CARD)
-        p.drawRoundedRect(pill, ph / 2, ph / 2)
-        p.setPen(TEXT)
-        p.drawText(pill, Qt.AlignCenter, pill_text)
-        if s.message and not s.finished:
-            p.setPen(BAD_RED)
-            p.setFont(_font(11 * scale))
-            p.drawText(QRectF(t.x(), pill.bottom() + 6, t.width(), 28), Qt.AlignCenter, s.message)
+            self._paint_running_label(p, regions["title"], scale, instruction if head else "")
         if head and self.head_state and "guide" in regions:
-            self._paint_head_guide(p, regions["guide"], self.head_state)
+            self._paint_head_guide(p, regions["guide"], self.head_state, scale)
 
         # aviso ESC semiopaco con progreso
         n = regions["notice"]
@@ -448,16 +446,14 @@ class CalibrationScreen(QWidget):
         p.setBrush(BG)
         p.drawRoundedRect(chip, 8, 8)
         p.setPen(TEXT)
-        p.setFont(_font(11, True))
+        p.setFont(_font(12, True))
         p.drawText(chip, Qt.AlignCenter, "ESC")
-        p.setFont(_font(11))
+        p.setFont(_font(13))
         p.setPen(TEXT_SECONDARY)
         p.drawText(
             QRectF(chip.right() + 12, n.y() + 6, n.width() - chip.width() - 40, n.height() - 18),
             Qt.AlignVCenter | Qt.AlignLeft | Qt.TextWordWrap,
-            "Mantén presionada ESC para saltar este paso final (la calibración ya está hecha)"
-            if head
-            else "Mantén presionada ESC para salir de la calibración",
+            "Mantén ESC para saltar este paso" if head else "Mantén ESC para salir",
         )
         hp = self.hold.progress(now)
         bar = QRectF(n.x() + 14, n.bottom() - 10, n.width() - 28, 5)
@@ -469,14 +465,72 @@ class CalibrationScreen(QWidget):
             p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * hp, bar.height()), 2.5, 2.5)
         p.end()
 
+    def _paint_start_panel(self, p: QPainter, r: QRectF, scale: float, title: str, instruction: str, secondary: str):
+        """Tarjeta grande antes de cada pantalla: título, instrucción breve y "Pulsa Enter para empezar"."""
+        p.setPen(QPen(BORDER, 1))
+        p.setBrush(CARD)
+        p.drawRoundedRect(r, 24, 24)
+        rows = [(title, _font(34 * scale, True), TEXT, 1.0), (instruction, _font(30 * scale, True), TEXT, 1.3)]
+        if secondary:
+            rows.append((secondary, _font(22 * scale), TEXT_SECONDARY, 0.8))
+        rows.append(("Pulsa Enter para empezar", _font(26 * scale, True), ACCENT, 1.0))
+        total = sum(weight for *_rest, weight in rows)
+        y = r.y() + 0.06 * r.height()
+        usable = 0.88 * r.height()
+        for text, font, color, weight in rows:
+            hh = usable * weight / total
+            p.setFont(font)
+            p.setPen(color)
+            p.drawText(QRectF(r.x() + 24, y, r.width() - 48, hh), Qt.AlignCenter | Qt.TextWordWrap, text)
+            y += hh
+        if self.session.message:
+            p.setPen(BAD_RED)
+            p.setFont(_font(16 * scale))
+            p.drawText(QRectF(r.x(), r.bottom() + 6, r.width(), 40 * scale), Qt.AlignCenter | Qt.TextWordWrap, self.session.message)
+
+    def _paint_running_label(self, p: QPainter, t: QRectF, scale: float, instruction: str):
+        """Durante la captura: instrucción breve (solo en la cabeza) y píldora grande con el avance."""
+        s = self.session
+        if s.in_head:
+            n_head = len(s.head_motion)
+            action = "Quédate quieto" if s.phase == "capturing" else "Prepárate"
+            pill_text = f"Paso {min(s.head_index + 1, n_head)} de {n_head} · {action}"
+        elif s.in_validation:
+            n_val = len(s.validation)
+            pill_text = f"Comprobación {min(s.validation_index + 1, n_val)} de {n_val}"
+        else:
+            pill_text = f"Punto {min(s.point_index + 1, s.total)} de {s.total}"
+        top = t.y()
+        if instruction:
+            p.setPen(TEXT)
+            p.setFont(_font(28 * scale, True))
+            p.drawText(QRectF(t.x(), top, t.width(), t.height() * 0.5), Qt.AlignCenter | Qt.TextWordWrap, instruction)
+            top += t.height() * 0.5
+        p.setFont(_font(22 * scale, True))
+        fm = p.fontMetrics()
+        pw = fm.horizontalAdvance(pill_text) + 40
+        ph = fm.height() + 18
+        if not instruction:  # solo la píldora: centrada en su franja
+            top = t.center().y() - ph / 2 - 4
+        pill = QRectF(t.center().x() - pw / 2, top + 4, pw, ph)
+        p.setPen(QPen(BORDER, 1))
+        p.setBrush(CARD)
+        p.drawRoundedRect(pill, ph / 2, ph / 2)
+        p.setPen(TEXT)
+        p.drawText(pill, Qt.AlignCenter, pill_text)
+        if s.message and not s.finished:
+            p.setPen(BAD_RED)
+            p.setFont(_font(16 * scale))
+            p.drawText(QRectF(t.x(), pill.bottom() + 6, t.width(), 40 * scale), Qt.AlignCenter | Qt.TextWordWrap, s.message)
+
     @staticmethod
-    def _paint_head_guide(p: QPainter, r: QRectF, state: dict):
+    def _paint_head_guide(p: QPainter, r: QRectF, state: dict, scale: float = 1.0):
         """Texto del giro actual y barra con la zona objetivo (verde dentro, ámbar fuera)."""
         color = OK_GREEN if state["in_zone"] else QColor("#FFB020")
         p.setPen(color)
-        p.setFont(_font(12, True))
-        p.drawText(QRectF(r.x(), r.y(), r.width(), 24), Qt.AlignCenter, head_guide_text(state))
-        bar = QRectF(r.x(), r.y() + 30, r.width(), 8)
+        p.setFont(_font(16 * scale, True))
+        p.drawText(QRectF(r.x(), r.y(), r.width(), 34), Qt.AlignCenter, head_guide_text(state))
+        bar = QRectF(r.x(), r.y() + 42, r.width(), 8)
         span = max(state["hi"] * 1.5, 1.0)  # la barra llega a 1.5 x el máximo de la zona
         p.setPen(Qt.NoPen)
         p.setBrush(BORDER)
@@ -661,7 +715,7 @@ def error_source_text(
                 f" No se aplicó la corrección automática del desvío común: no mejoraba (~{int(round(skipped_px))} px)."
             )
         if cv_px is not None:
-            text += f" Validación cruzada de los 9 puntos: ~{int(round(cv_px))} px."
+            text += f" Validación cruzada de los puntos de calibración: ~{int(round(cv_px))} px."
         return text
     if source == "cv":
         return "Estimado con validación cruzada (dejando un punto fuera); no hubo puntos de validación suficientes."
@@ -1043,7 +1097,7 @@ class CalibrationDialog(QDialog):
         return QGuiApplication.primaryScreen()
 
     def start_calibration(self):
-        """Abre la pantalla completa de calibración (9 puntos) reutilizando el tracker del modal.
+        """Abre la pantalla completa de calibración (13 puntos) reutilizando el tracker del modal.
 
         Requiere que el modal NO se haya abierto con exec(): ocultarlo (hide) terminaría el bucle de
         exec() y, sin otra referencia, PySide destruiría el modal y con él la pantalla completa.
@@ -1056,7 +1110,16 @@ class CalibrationDialog(QDialog):
             # orden balanceado: un movimiento de cabeza no queda ligado a la fila/columna del punto
             # --record-session añade la fase de movimiento de cabeza (datos para compensarla más adelante)
             head = HEAD_MOTION_STEPS if self.record_dir else None
-            session = CalibrationSession(geom["width"], geom["height"], validation=val, order="balanced", head_motion=head)
+            session = CalibrationSession(
+                geom["width"],
+                geom["height"],
+                margin=CALIBRATION_MARGIN,
+                layout=CALIBRATION_LAYOUT,
+                validation=val,
+                order="balanced",
+                head_motion=head,
+                wait_for_start=True,  # Enter antes de cada pantalla: tiempo para leer la instrucción
+            )
             logger.info("Orden de los puntos de calibración: %s", session.order)
             self.recorder = self._make_recorder(screen, geom, session) if self.record_dir else None
             from calibration import gaze_fit_options

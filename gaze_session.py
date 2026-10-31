@@ -32,6 +32,7 @@ from calibration import (
     MODELS,
     PHASE_CAPTURING,
     PHASE_SETTLING,
+    PHASE_WAITING,
     STAGE_VALIDATION,
     HEAD_MOTION_STEPS,
     CalibrationSession,
@@ -61,7 +62,7 @@ SESSIONS_DIRNAME = "sessions"
 DEFAULT_DISTANCE_MM = 600.0  # distancia de visión supuesta para convertir px a grados
 
 STAGE_CODES = {"calibration": 0, "validation": 1, "head": 2}
-PHASE_CODES = {PHASE_SETTLING: 0, PHASE_CAPTURING: 1}  # cualquier otra fase -> 2
+PHASE_CODES = {PHASE_SETTLING: 0, PHASE_CAPTURING: 1, PHASE_WAITING: 3}  # 3 = esperando Enter; terminada u otra -> 2
 
 
 def default_sessions_dir() -> str:
@@ -89,6 +90,8 @@ def make_session_meta(
         "calibration_points": [list(map(float, p)) for p in session.points],  # en orden de presentación
         "calibration_order": list(getattr(session, "order", range(len(session.points)))),
         "validation_points": [list(map(float, p)) for p in session.validation],
+        "calibration_layout": getattr(session, "layout", "grid9"),
+        "wait_for_start": bool(getattr(session, "wait_for_start", False)),
         "settle_s": session.settle_s,
         "capture_s": session.capture_s,
         # fase de movimiento de cabeza (stage 2, point = paso): [clave, segundos de movimiento]

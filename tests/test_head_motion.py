@@ -56,7 +56,7 @@ class TestHeadMotionStage(unittest.TestCase):
         self.assertEqual(keys, ["still", "left", "right", "up", "down", "near", "far"])
         self.assertEqual(set(HEAD_STEP_AXIS), set(keys) - {"still"})
         for _k, text, sec in HEAD_MOTION_STEPS:
-            self.assertIn("quieto" if _k != "still" else "sin mover", text)
+            self.assertLessEqual(len(text), 30)  # instrucciones breves (se leen en grande)
             self.assertAlmostEqual(sec, 2.5)
 
     def test_runs_after_validation_without_changing_the_result(self):

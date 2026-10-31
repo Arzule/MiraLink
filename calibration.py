@@ -1,4 +1,4 @@
-"""Calibración de 9 puntos y mapeo mirada-pantalla (lógica pura, solo numpy).
+"""Calibración (13 puntos en la aplicación) y mapeo mirada-pantalla (lógica pura, solo numpy).
 
 Nada aquí toca hardware ni relojes: la sesión recibe timestamps (los de TrackingFrame) y
 el mapper trabaja con arreglos. Las coordenadas de pantalla son píxeles físicos.
@@ -730,6 +730,7 @@ def choose_eye(candidates: Dict[str, Dict[str, float]]) -> str:
 
 
 # ---------------------------------------------------------------- sesión
+PHASE_WAITING = "waiting"  # espera a que el usuario pulse Enter (start_stage) antes de cada pantalla
 PHASE_SETTLING = "settling"
 PHASE_CAPTURING = "capturing"
 PHASE_DONE = "done"
@@ -744,14 +745,15 @@ STAGE_HEAD = "head"
 # quieto); antes de cada paso hay HEAD_SETTLE_S para leer la instrucción y colocarse.
 # Sesiones reales del 17/10: con movimientos continuos y grandes (56-62° de giro) se mezclaba el retraso
 # con la geometría y se perdía la cara; por eso poses quietas de ~10° (HEAD_POSE_TARGETS).
+# Instrucciones breves (se leen en grande antes de pulsar Enter; "sigue mirando el punto" va aparte).
 HEAD_MOTION_STEPS = (
-    ("still", "Mira el punto sin mover la cabeza.", 2.5),
-    ("left", "Gira la cabeza un poco hacia tu izquierda y quédate quieto, sin dejar de mirar el punto.", 2.5),
-    ("right", "Gira la cabeza un poco hacia tu derecha y quédate quieto, sin dejar de mirar el punto.", 2.5),
-    ("up", "Sube un poco la barbilla y quédate quieto, sin dejar de mirar el punto.", 2.5),
-    ("down", "Baja un poco la barbilla y quédate quieto, sin dejar de mirar el punto.", 2.5),
-    ("near", "Acércate un poco a la pantalla y quédate quieto, sin dejar de mirar el punto.", 2.5),
-    ("far", "Aléjate un poco de la pantalla y quédate quieto, sin dejar de mirar el punto.", 2.5),
+    ("still", "Cabeza quieta", 2.5),
+    ("left", "Gira un poco a tu izquierda", 2.5),
+    ("right", "Gira un poco a tu derecha", 2.5),
+    ("up", "Sube un poco la barbilla", 2.5),
+    ("down", "Baja un poco la barbilla", 2.5),
+    ("near", "Acércate un poco", 2.5),
+    ("far", "Aléjate un poco", 2.5),
 )
 HEAD_SETTLE_S = 2.0
 # Eje que mide cada paso y zona objetivo del indicador en vivo (grados de giro/inclinación respecto al
@@ -821,9 +823,18 @@ def head_guide_text(state: Optional[dict]) -> str:
         verdict = "demasiado, vuelve un poco"
     return f"{name}: {state['value']:.0f}{unit} (objetivo {state['lo']:.0f}-{state['hi']:.0f}{unit}): {verdict}"
 
-# Puntos de validación (fracción de la pantalla): centro desplazado y cuatro intermedios, todos
-# distintos de la cuadrícula 3x3 de calibración. Miden el error real con puntos no usados al ajustar.
-VALIDATION_LAYOUT = ((0.30, 0.30), (0.70, 0.30), (0.42, 0.56), (0.30, 0.70), (0.70, 0.70))
+# Puntos de validación (fracción de la pantalla): rectángulo central (esquinas al 35 y 65 %) y su centro,
+# en orden: arriba izquierda, arriba derecha, centro, abajo izquierda, abajo derecha. Las esquinas no
+# coinciden con la calibración (13 puntos: bordes, 25/75 % y centro); el centro sí (mide la deriva).
+# Antes (hasta el 31/10): (0.30, 0.30), (0.70, 0.30), (0.42, 0.56), (0.30, 0.70), (0.70, 0.70), irregular.
+VALIDATION_LAYOUT = ((0.35, 0.35), (0.65, 0.35), (0.50, 0.50), (0.35, 0.65), (0.65, 0.65))
+
+# Calibración de la aplicación (31/10): puntos AL BORDE (margen 2 %) para no extrapolar hacia los bordes
+# (con márgenes del 10 %, en la sesión 000755 las esquinas solo llegaban a la mitad del recorrido vertical)
+# y 4 puntos intermedios (25/75 %) que dan más filas al eje vertical, el más inestable con 9 puntos.
+CALIBRATION_MARGIN = 0.02
+CALIBRATION_LAYOUT = "grid13"
+INNER_POINTS = ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75))
 
 
 def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[float, float]]:
@@ -831,6 +842,16 @@ def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[flo
     xs = [width * margin, width * 0.5, width * (1.0 - margin)]
     ys = [height * margin, height * 0.5, height * (1.0 - margin)]
     return [(x, y) for y in ys for x in xs]
+
+
+def calibration_points(width: int, height: int, margin: float = 0.10, layout: str = "grid9") -> List[Tuple[float, float]]:
+    """grid9: la cuadrícula 3x3; grid13: la 3x3 (índices 0-8) + INNER_POINTS (índices 9-12)."""
+    pts = grid_points(width, height, margin)
+    if layout == "grid9":
+        return pts
+    if layout == "grid13":
+        return pts + [(width * fx, height * fy) for fx, fy in INNER_POINTS]
+    raise ValueError(f"disposición de puntos desconocida: {layout}")
 
 
 def validation_points(width: int, height: int) -> List[Tuple[float, float]]:
@@ -849,6 +870,15 @@ def is_balanced_order(order) -> bool:
         if len({i // 3 for i in chunk}) != 3 or len({i % 3 for i in chunk}) != 3:
             return False
     return True
+
+
+def balanced_order13(rng: Optional[np.random.Generator] = None) -> List[int]:
+    """Orden de grid13: intermedio, tramo, intermedio, tramo, intermedio, tramo, intermedio (los tramos
+    de la 3x3 balanceados como balanced_order y los 4 intermedios, índices 9-12, en orden aleatorio)."""
+    rng = rng if rng is not None else np.random.default_rng()
+    grid = balanced_order(rng)
+    inner = [9 + int(i) for i in rng.permutation(len(INNER_POINTS))]
+    return [inner[0], *grid[0:3], inner[1], *grid[3:6], inner[2], *grid[6:9], inner[3]]
 
 
 def balanced_order(rng: Optional[np.random.Generator] = None) -> List[int]:
@@ -891,7 +921,7 @@ class CalibrationResult:
 
 
 class CalibrationSession:
-    """Flujo de calibración de 9 puntos con timestamps inyectados (sin reloj propio).
+    """Flujo de calibración (9 puntos, o 13 con layout="grid13") con timestamps inyectados (sin reloj propio).
 
     Por punto: `settle_s` de asentamiento (se descartan los cuadros) y `capture_s` de captura.
     Se descartan cuadros sin rostro u ojos cerrados. Si al terminar la captura hay menos de
@@ -935,10 +965,16 @@ class CalibrationSession:
         rng: Optional[np.random.Generator] = None,
         head_motion: Optional[List[Tuple[str, str, float]]] = None,
         head_settle_s: float = HEAD_SETTLE_S,
+        layout: str = "grid9",
+        wait_for_start: bool = False,
     ):
-        grid = grid_points(width, height, margin)
+        grid = calibration_points(width, height, margin, layout)
+        self.layout = layout
+        # con wait_for_start cada pantalla (calibración, validación y cada paso de cabeza) empieza en
+        # PHASE_WAITING y no avanza hasta start_stage() (Enter): da tiempo a leer la instrucción
+        self.wait_for_start = bool(wait_for_start)
         if order == "balanced":
-            self.order = balanced_order(rng)
+            self.order = balanced_order13(rng) if layout == "grid13" else balanced_order(rng)
         elif order == "grid":
             self.order = list(range(len(grid)))
         else:
@@ -961,7 +997,7 @@ class CalibrationSession:
         self.point_index = 0
         self.validation_index = 0
         self.retries = 0
-        self.phase = PHASE_SETTLING
+        self.phase = PHASE_WAITING if self.wait_for_start else PHASE_SETTLING
         self.message = ""
         self._phase_start: Optional[float] = None
         self._samples: List[np.ndarray] = []
@@ -1019,6 +1055,27 @@ class CalibrationSession:
     def sample_count(self) -> int:
         return len(self._samples)
 
+    @property
+    def awaiting_start(self) -> bool:
+        return self.phase == PHASE_WAITING
+
+    def start_stage(self) -> bool:
+        """Enter: empieza la pantalla en espera (el tiempo cuenta desde el siguiente cuadro). True si empezó."""
+        if not self.awaiting_start:
+            return False
+        self.phase = PHASE_SETTLING
+        self._phase_start = None
+        return True
+
+    def _begin_stage(self, timestamp: float):
+        """Nueva pantalla: espera a Enter (wait_for_start) o empieza ya a asentarse."""
+        if self.wait_for_start:
+            self.phase = PHASE_WAITING
+            self._phase_start = None
+        else:
+            self.phase = PHASE_SETTLING
+            self._phase_start = timestamp
+
     def phase_progress(self, now: float) -> float:
         """Avance 0..1 de la fase actual."""
         if self._phase_start is None or self.finished:
@@ -1041,7 +1098,7 @@ class CalibrationSession:
         """Procesa un cuadro (o un tick sin rostro con valid=False). Devuelve la fase actual.
         Con `ear` (y robust) se ignora `eyes_closed`: el cierre se decide por punto al terminarlo.
         `ears` = (EAR derecho, EAR izquierdo), solo para los modelos EAR-mirada de cada ojo."""
-        if self.finished:
+        if self.finished or self.awaiting_start:
             return self.phase
         if self.in_head:
             return self._update_head(timestamp)
@@ -1088,8 +1145,7 @@ class CalibrationSession:
                 self.head_index = len(self.head_motion) - 1
                 self.phase = PHASE_DONE
             else:
-                self.phase = PHASE_SETTLING
-                self._phase_start = timestamp
+                self._begin_stage(timestamp)  # cada paso es una pantalla: instrucción nueva
         return self.phase
 
     def _complete(self, timestamp: float):
@@ -1101,8 +1157,7 @@ class CalibrationSession:
         self.head_index = 0
         self.retries = 0
         self.message = ""
-        self.phase = PHASE_SETTLING
-        self._phase_start = timestamp
+        self._begin_stage(timestamp)
 
     def skip_head(self):
         """Termina la fase de movimiento de cabeza (la calibración ya está completa)."""
@@ -1158,6 +1213,8 @@ class CalibrationSession:
                     return
                 self.stage = STAGE_VALIDATION
                 self.validation_index = 0
+                self._begin_stage(timestamp)
+                return
             else:
                 self.point_index = idx + 1
         else:
