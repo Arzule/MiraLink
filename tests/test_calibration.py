@@ -286,35 +286,21 @@ if __name__ == "__main__":
 
 
 class TestEdgeLayoutAndEnter(unittest.TestCase):
-    """Calibración de la aplicación (31/10): 13 puntos al borde y Enter antes de cada pantalla."""
+    """Calibración de la aplicación (31/10): 9 puntos al borde y Enter antes de cada pantalla."""
 
-    def test_grid13_points_at_the_edges_plus_inner_points(self):
+    def test_app_grid_is_at_the_edges(self):
         import calibration as cal
 
-        pts = cal.calibration_points(2560, 1440, cal.CALIBRATION_MARGIN, "grid13")
-        self.assertEqual(len(pts), 13)
-        self.assertEqual(pts[0], (2560 * 0.02, 1440 * 0.02))
-        self.assertEqual(pts[8], (2560 * 0.98, 1440 * 0.98))
-        self.assertEqual(pts[9:], [(640.0, 360.0), (1920.0, 360.0), (640.0, 1080.0), (1920.0, 1080.0)])
-        with self.assertRaises(ValueError):
-            cal.calibration_points(100, 100, layout="otra")
-
-    def test_balanced_order13_interleaves_inner_points(self):
-        import calibration as cal
-
-        rng = np.random.default_rng(0)
-        for _ in range(20):
-            order = cal.balanced_order13(rng)
-            self.assertEqual(sorted(order), list(range(13)))
-            self.assertEqual(sorted(order[i] for i in (0, 4, 8, 12)), [9, 10, 11, 12])
-            grid = [i for i in order if i < 9]
-            self.assertTrue(cal.is_balanced_order(grid))
+        s = cal.CalibrationSession(2560, 1440, margin=cal.CALIBRATION_MARGIN)
+        self.assertEqual(s.total, 9)
+        self.assertIn((2560 * 0.02, 1440 * 0.02), s.points)
+        self.assertIn((2560 * 0.98, 1440 * 0.98), s.points)
 
     def test_each_screen_waits_for_enter(self):
         import calibration as cal
 
         s = cal.CalibrationSession(W, H, validation=cal.validation_points(W, H), head_motion=cal.HEAD_MOTION_STEPS[:2],
-                                   wait_for_start=True, layout="grid13", margin=cal.CALIBRATION_MARGIN)
+                                   wait_for_start=True, margin=cal.CALIBRATION_MARGIN)
         x = np.zeros(10)
         self.assertTrue(s.awaiting_start)
         for t in np.arange(0, 20, 1 / 30):  # sin Enter no avanza, aunque lleguen cuadros

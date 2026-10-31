@@ -1,4 +1,4 @@
-"""Calibración (13 puntos en la aplicación) y mapeo mirada-pantalla (lógica pura, solo numpy).
+"""Calibración de 9 puntos y mapeo mirada-pantalla (lógica pura, solo numpy).
 
 Nada aquí toca hardware ni relojes: la sesión recibe timestamps (los de TrackingFrame) y
 el mapper trabaja con arreglos. Las coordenadas de pantalla son píxeles físicos.
@@ -825,16 +825,15 @@ def head_guide_text(state: Optional[dict]) -> str:
 
 # Puntos de validación (fracción de la pantalla): rectángulo central (esquinas al 35 y 65 %) y su centro,
 # en orden: arriba izquierda, arriba derecha, centro, abajo izquierda, abajo derecha. Las esquinas no
-# coinciden con la calibración (13 puntos: bordes, 25/75 % y centro); el centro sí (mide la deriva).
+# coinciden con la calibración (3x3 al borde); el centro sí (mide la deriva).
 # Antes (hasta el 31/10): (0.30, 0.30), (0.70, 0.30), (0.42, 0.56), (0.30, 0.70), (0.70, 0.70), irregular.
 VALIDATION_LAYOUT = ((0.35, 0.35), (0.65, 0.35), (0.50, 0.50), (0.35, 0.65), (0.65, 0.65))
 
-# Calibración de la aplicación (31/10): puntos AL BORDE (margen 2 %) para no extrapolar hacia los bordes
-# (con márgenes del 10 %, en la sesión 000755 las esquinas solo llegaban a la mitad del recorrido vertical)
-# y 4 puntos intermedios (25/75 %) que dan más filas al eje vertical, el más inestable con 9 puntos.
+# Calibración de la aplicación (31/10): cuadrícula 3x3 AL BORDE (margen 2 %) para no extrapolar hacia los
+# bordes (con márgenes del 10 %, en la sesión 000755 las esquinas solo llegaban a la mitad del recorrido
+# vertical). Se probaron 13 puntos (+4 al 25/75 %) y se quitaron a pedido del usuario: repetían la zona
+# de la validación y alargaban la calibración (sesión 005741: no mejoraban el error en la validación).
 CALIBRATION_MARGIN = 0.02
-CALIBRATION_LAYOUT = "grid13"
-INNER_POINTS = ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75))
 
 
 def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[float, float]]:
@@ -842,16 +841,6 @@ def grid_points(width: int, height: int, margin: float = 0.10) -> List[Tuple[flo
     xs = [width * margin, width * 0.5, width * (1.0 - margin)]
     ys = [height * margin, height * 0.5, height * (1.0 - margin)]
     return [(x, y) for y in ys for x in xs]
-
-
-def calibration_points(width: int, height: int, margin: float = 0.10, layout: str = "grid9") -> List[Tuple[float, float]]:
-    """grid9: la cuadrícula 3x3; grid13: la 3x3 (índices 0-8) + INNER_POINTS (índices 9-12)."""
-    pts = grid_points(width, height, margin)
-    if layout == "grid9":
-        return pts
-    if layout == "grid13":
-        return pts + [(width * fx, height * fy) for fx, fy in INNER_POINTS]
-    raise ValueError(f"disposición de puntos desconocida: {layout}")
 
 
 def validation_points(width: int, height: int) -> List[Tuple[float, float]]:
@@ -870,15 +859,6 @@ def is_balanced_order(order) -> bool:
         if len({i // 3 for i in chunk}) != 3 or len({i % 3 for i in chunk}) != 3:
             return False
     return True
-
-
-def balanced_order13(rng: Optional[np.random.Generator] = None) -> List[int]:
-    """Orden de grid13: intermedio, tramo, intermedio, tramo, intermedio, tramo, intermedio (los tramos
-    de la 3x3 balanceados como balanced_order y los 4 intermedios, índices 9-12, en orden aleatorio)."""
-    rng = rng if rng is not None else np.random.default_rng()
-    grid = balanced_order(rng)
-    inner = [9 + int(i) for i in rng.permutation(len(INNER_POINTS))]
-    return [inner[0], *grid[0:3], inner[1], *grid[3:6], inner[2], *grid[6:9], inner[3]]
 
 
 def balanced_order(rng: Optional[np.random.Generator] = None) -> List[int]:
@@ -921,7 +901,7 @@ class CalibrationResult:
 
 
 class CalibrationSession:
-    """Flujo de calibración (9 puntos, o 13 con layout="grid13") con timestamps inyectados (sin reloj propio).
+    """Flujo de calibración de 9 puntos con timestamps inyectados (sin reloj propio).
 
     Por punto: `settle_s` de asentamiento (se descartan los cuadros) y `capture_s` de captura.
     Se descartan cuadros sin rostro u ojos cerrados. Si al terminar la captura hay menos de
@@ -965,16 +945,15 @@ class CalibrationSession:
         rng: Optional[np.random.Generator] = None,
         head_motion: Optional[List[Tuple[str, str, float]]] = None,
         head_settle_s: float = HEAD_SETTLE_S,
-        layout: str = "grid9",
         wait_for_start: bool = False,
     ):
-        grid = calibration_points(width, height, margin, layout)
-        self.layout = layout
+        grid = grid_points(width, height, margin)
+        self.margin = float(margin)
         # con wait_for_start cada pantalla (calibración, validación y cada paso de cabeza) empieza en
         # PHASE_WAITING y no avanza hasta start_stage() (Enter): da tiempo a leer la instrucción
         self.wait_for_start = bool(wait_for_start)
         if order == "balanced":
-            self.order = balanced_order13(rng) if layout == "grid13" else balanced_order(rng)
+            self.order = balanced_order(rng)
         elif order == "grid":
             self.order = list(range(len(grid)))
         else:

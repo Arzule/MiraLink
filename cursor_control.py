@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from config_manager import DEFAULT_CONFIG
-from gaze_filters import MedianFilter, OneEuroFilter, apply_deadzone, smoothing_to_min_cutoff
+from gaze_filters import MedianFilter, OneEuroFilter, apply_deadzone, smoothing_to_min_cutoff, snap_center, snap_strength
 
 STATE_IDLE = "IDLE"
 STATE_DWELL = "DWELL"
@@ -301,6 +301,7 @@ class CursorController:
         config_getter: Callable[[], Dict] = lambda: {},
         listener: Optional[Callable[[str, float, float], None]] = None,
         filter_kind: str = "one_euro",
+        snap_targets: Optional[Callable[[], list]] = None,
     ):
         if filter_kind not in ("one_euro", "exponential"):
             raise ValueError(f"filtro desconocido: {filter_kind}")
@@ -312,6 +313,9 @@ class CursorController:
         self.config_getter = config_getter
         self.listener = listener
         self.filter_kind = filter_kind
+        # radio magnético: rectángulos (x, y, ancho, alto) en las coordenadas del cursor (botones flotantes)
+        self.snap_targets = snap_targets or (lambda: [])
+        self._snapped: Optional[Tuple[float, float]] = None
         self.state = STATE_IDLE
         self.paused = False
         self.pos: Optional[Tuple[float, float]] = None  # salida del filtro, relativa a la pantalla (sin origen)
@@ -483,11 +487,28 @@ class CursorController:
         gx = min(max(gx, 0.0), self.width - 1.0)
         gy = min(max(gy, 0.0), self.height - 1.0)
         self.pos = self._filter(gx, gy, dt, ts)
-        shown = apply_deadzone(self.display, self.pos, float(self._cfg("deadzone_px")))
+        shown = apply_deadzone(self.display, self._snap(self.pos, dt), float(self._cfg("deadzone_px")))
         moved = self.display is None or abs(shown[0] - self.display[0]) >= 0.5 or abs(shown[1] - self.display[1]) >= 0.5
         if moved:
             self.display = shown
             self.mouse.move(shown[0] + self.origin[0], shown[1] + self.origin[1])
+
+    def _snap(self, pos: Tuple[float, float], dt: float) -> Tuple[float, float]:
+        """Radio magnético (tras el One Euro, antes de la zona muerta): mientras la mirada filtrada esté a
+        menos de snap_radius_px de un botón, la posición mostrada se acerca a su centro de forma suave
+        (snap_strength, independiente de los fps) y se queda ahí; al salir del radio vuelve a la mirada."""
+        try:
+            targets = self.snap_targets() or []
+        except Exception:  # noqa: BLE001 - sin botones no hay atracción
+            targets = []
+        center = snap_center(pos, targets, float(self._cfg("snap_radius_px")))
+        if center is None:
+            self._snapped = None
+            return pos
+        base = self._snapped if self._snapped is not None else pos
+        k = snap_strength(dt)
+        self._snapped = (base[0] + k * (center[0] - base[0]), base[1] + k * (center[1] - base[1]))
+        return self._snapped
 
     def _handle_blink(self, event, ts: float):
         if ts < self._ignore_until:

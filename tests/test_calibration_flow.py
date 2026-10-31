@@ -343,7 +343,7 @@ class TestCalibrationFlow(FlowBase):
 
         ok = self.wait_until(lambda: win.calibration_dialog is None, timeout_s=30)
         self.assertTrue(ok, f"La calibración no terminó; puntos vistos: {sorted(self.gaze.points_seen)}")
-        self.assertEqual(self.gaze.points_seen, set(range(13)))
+        self.assertEqual(self.gaze.points_seen, set(range(9)))
         self.assertEqual(self.result_dialogs, 1)
         self.assertTrue(os.path.isfile(self.cal_path))
         mapper = load_calibration(self.cal_path, screen_geometry_from_qt(win.screen()))

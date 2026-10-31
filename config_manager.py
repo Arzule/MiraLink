@@ -32,13 +32,16 @@ DEFAULT_CONFIG = {
         "one_euro_d_cutoff": 1.0,
         "feature_median_window": 3,
         "deadzone_px": 4,
+        # radio magnético de los botones flotantes (px físicos desde el borde del botón; 0 = desactivado)
+        "snap_radius_px": 60,
     },
     # eye: con qué ojo se sigue la mirada y se detectan los parpadeos. "auto" = en cada calibración se elige
     # el de menor temblor (entre los de error parecido); "right"/"left"/"both" lo fuerzan.
     # selected_eye: el ojo de la última calibración aceptada (lo escribe la aplicación; null = ninguna)
     "tracking": {"eye": "auto", "selected_eye": None, "gaze_model": "iris"},
     "ui": {"theme": "default", "font_scale": 1.0},
-    "overlay": {"buttons": {}},
+    # botones flotantes (solo con el control del cursor activo): lado de la pantalla y tamaño en px lógicos
+    "overlay": {"enabled": True, "position": "right", "button_size": 180, "buttons": {}},
     "tts": {"enabled": False},
 }
 
@@ -154,6 +157,7 @@ def _validate_config(config):
         ("hold_timeout_s", 5, 120),
         ("feature_median_window", 1, 9),
         ("deadzone_px", 0, 50),
+        ("snap_radius_px", 0, 300),
     ):
         try:
             inter[key] = _clamp(int(inter.get(key, DEFAULT_CONFIG["interaction"][key])), lo, hi)
@@ -200,8 +204,17 @@ def _validate_config(config):
     # overlay
     if not isinstance(validated.get("overlay", {}), dict):
         validated["overlay"] = {}
-    if not isinstance(validated["overlay"].get("buttons"), dict):
-        validated["overlay"]["buttons"] = {}
+    overlay = validated["overlay"]
+    if not isinstance(overlay.get("buttons"), dict):
+        overlay["buttons"] = {}
+    if not isinstance(overlay.get("enabled"), bool):
+        overlay["enabled"] = DEFAULT_CONFIG["overlay"]["enabled"]
+    if overlay.get("position") not in ("right", "left"):
+        overlay["position"] = DEFAULT_CONFIG["overlay"]["position"]
+    try:
+        overlay["button_size"] = _clamp(int(overlay.get("button_size", DEFAULT_CONFIG["overlay"]["button_size"])), 96, 320)
+    except Exception:
+        overlay["button_size"] = DEFAULT_CONFIG["overlay"]["button_size"]
 
     # tts
     if not isinstance(validated.get("tts", {}), dict):

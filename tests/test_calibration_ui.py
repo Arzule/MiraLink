@@ -320,9 +320,9 @@ class TestCalibrationScreen(UITestBase):
         return scr, clock
 
     def test_regions_do_not_overlap_points_or_each_other(self):
-        # disposición de la aplicación: 13 puntos con margen del 2 %
+        # disposición de la aplicación: 9 puntos con margen del 2 %
         for w, h in ((1280, 720), (1920, 1080), (1366, 768), (2560, 1440)):
-            scr, _ = self.make_screen(w, h, margin=cal.CALIBRATION_MARGIN, layout=cal.CALIBRATION_LAYOUT)
+            scr, _ = self.make_screen(w, h, margin=cal.CALIBRATION_MARGIN)
             regions = scr.layout_regions()
             panel = regions.pop("panel")  # solo se ve mientras espera Enter (sin puntos ni píldora)
             for name in ("notice", "mini"):
@@ -333,8 +333,8 @@ class TestCalibrationScreen(UITestBase):
                     self.assertFalse(
                         regions[names[i]].intersects(regions[names[j]]), f"{names[i]} y {names[j]} ({w}x{h})"
                     )
-            self.assertEqual(scr.session.total, 13)
-            for k in range(13):
+            self.assertEqual(scr.session.total, 9)
+            for k in range(9):
                 c = scr.logical_point(k)
                 sc = max(0.6, h / 1080.0)
                 # anillos (radio 60*sc) y etiqueta "Mira aquí" (hasta 220*sc a un lado)
@@ -459,7 +459,7 @@ class TestConfigWindowIntegration(UITestBase):
 
 
 class TestRecordSession(UITestBase):
-    """--record-session: 13 puntos + 5 de validación, cada cuadro grabado en sessions/."""
+    """--record-session: 9 puntos + 5 de validación, cada cuadro grabado en sessions/."""
 
     make_dialog = TestCalibrationDialog.make_dialog
 
@@ -498,8 +498,8 @@ class TestRecordSession(UITestBase):
             geom = screen_geometry_from_qt(QGuiApplication.primaryScreen())
             self.assertEqual(sess.meta["screen"], geom)
             self.assertEqual(len(sess.meta["validation_points"]), 5)
-            self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(13)))
-            self.assertEqual((sess.meta["calibration_layout"], sess.meta["wait_for_start"]), ("grid13", True))
+            self.assertEqual(set(sess.point[sess.capture_mask("calibration")].tolist()), set(range(9)))
+            self.assertEqual((sess.meta["calibration_margin"], sess.meta["wait_for_start"]), (0.02, True))
             self.assertEqual(set(sess.point[sess.capture_mask("validation")].tolist()), set(range(5)))
             # fase de movimiento de cabeza al final (solo en --record-session), mirando el centro
             head = sess.stage == 2

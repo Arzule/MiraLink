@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
 )
 
 from calibration import (
-    CALIBRATION_LAYOUT,
     CALIBRATION_MARGIN,
     HEAD_MOTION_STEPS,
     STAGE_HEAD,
@@ -158,7 +157,7 @@ class CameraPreview(QWidget):
 
 # ------------------------------------------------------ pantalla completa
 class CalibrationScreen(QWidget):
-    """Pantalla completa con los puntos de calibración (13 en la aplicación). Emite `completed(GazeMapper)` o `aborted(str)`."""
+    """Pantalla completa con los 9 puntos. Emite `completed(GazeMapper)` o `aborted(str)`."""
 
     completed = Signal(object)
     aborted = Signal(str)
@@ -314,8 +313,7 @@ class CalibrationScreen(QWidget):
     def layout_regions(self, stage: Optional[str] = None) -> Dict[str, QRectF]:
         """Zonas de texto, aviso ESC y mini previsualización.
 
-        Calibración (13 puntos: bordes al 2 %, 25/75 % y centro): rótulo al 37.5 % (entre las filas 25 y
-        50 %) y aviso al 62.5 % (entre 50 y 75 %). Validación (rectángulo 35-65 %) y cabeza (punto central):
+        Calibración (3x3 con los bordes al 2 %): rótulo al 37.5 % y aviso al 62.5 % (entre las filas). Validación (rectángulo 35-65 %) y cabeza (punto central):
         rótulo arriba (10 %) y aviso abajo (92 %). `panel`: tarjeta grande de "Pulsa Enter" mientras la
         pantalla espera (centrada; en la cabeza, arriba para dejar ver el punto central). `guide`: indicador
         en vivo de la fase de cabeza, bajo el rótulo o bajo el panel.
@@ -1097,7 +1095,7 @@ class CalibrationDialog(QDialog):
         return QGuiApplication.primaryScreen()
 
     def start_calibration(self):
-        """Abre la pantalla completa de calibración (13 puntos) reutilizando el tracker del modal.
+        """Abre la pantalla completa de calibración (9 puntos) reutilizando el tracker del modal.
 
         Requiere que el modal NO se haya abierto con exec(): ocultarlo (hide) terminaría el bucle de
         exec() y, sin otra referencia, PySide destruiría el modal y con él la pantalla completa.
@@ -1114,7 +1112,6 @@ class CalibrationDialog(QDialog):
                 geom["width"],
                 geom["height"],
                 margin=CALIBRATION_MARGIN,
-                layout=CALIBRATION_LAYOUT,
                 validation=val,
                 order="balanced",
                 head_motion=head,

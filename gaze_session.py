@@ -90,7 +90,7 @@ def make_session_meta(
         "calibration_points": [list(map(float, p)) for p in session.points],  # en orden de presentación
         "calibration_order": list(getattr(session, "order", range(len(session.points)))),
         "validation_points": [list(map(float, p)) for p in session.validation],
-        "calibration_layout": getattr(session, "layout", "grid9"),
+        "calibration_margin": float(getattr(session, "margin", 0.10)),
         "wait_for_start": bool(getattr(session, "wait_for_start", False)),
         "settle_s": session.settle_s,
         "capture_s": session.capture_s,
@@ -167,7 +167,10 @@ class SessionRecorder:
             self._image_size = (int(image.shape[1]), int(image.shape[0]))
         if self.face_crop_fn is not None:
             lm = getattr(frame, "landmarks", None)
-            crop = self.face_crop_fn(image, lm) if (image is not None and lm is not None and frame.face_found) else None
+            # sin recortes mientras la pantalla espera Enter (no se mide nada y era más de la mitad de la sesión)
+            waiting = bool(getattr(session, "awaiting_start", False))
+            usable = image is not None and lm is not None and frame.face_found and not waiting
+            crop = self.face_crop_fn(image, lm) if usable else None
             self._face_jpeg.append(crop[0] if crop else b"")
             self._face_box.append(tuple(map(float, crop[1])) if crop else None)
 

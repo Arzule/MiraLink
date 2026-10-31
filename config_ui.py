@@ -31,6 +31,23 @@ from theme_manager import list_themes, load_theme
 logger = logging.getLogger(__name__)
 
 
+class NoWheelSlider(QSlider):
+    """Slider que ignora la rueda del mouse: la rueda desplaza la ventana y no cambia el valor por accidente."""
+
+    def wheelEvent(self, event):
+        event.ignore()  # pasa al QScrollArea
+
+
+class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class ConfigWindow(QMainWindow):
     calibrate_requested = Signal()
     config_saved = Signal(dict)
@@ -190,7 +207,7 @@ class ConfigWindow(QMainWindow):
         theme_label.setObjectName("description")
         theme_label.setAccessibleName("Etiqueta tema")
         theme_row.addWidget(theme_label)
-        self.theme_combo = QComboBox(self.card_appearance)
+        self.theme_combo = NoWheelComboBox(self.card_appearance)
         self.theme_combo.setAccessibleName("Selector de tema")
         self.theme_combo.setMinimumHeight(48)
         self.theme_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -330,7 +347,7 @@ class ConfigWindow(QMainWindow):
         return card
 
     def _create_slider(self, minv, maxv, step, parent):
-        slider = QSlider(Qt.Horizontal, parent)
+        slider = NoWheelSlider(Qt.Horizontal, parent)
         slider.setRange(minv, maxv)
         slider.setSingleStep(step)
         slider.setPageStep(step * 5)
@@ -341,7 +358,7 @@ class ConfigWindow(QMainWindow):
         return slider
 
     def _create_spinbox(self, minv, maxv, step, suffix="", parent=None):
-        spin = QSpinBox(parent)
+        spin = NoWheelSpinBox(parent)
         spin.setRange(minv, maxv)
         spin.setSingleStep(step)
         spin.setSuffix(suffix)
@@ -472,6 +489,7 @@ class ConfigWindow(QMainWindow):
             camera_index_getter=lambda: int(self._config.get("camera", {}).get("device_index", 0)),
             camera_size_getter=lambda: camera_size(self._config),
             camera_exposure_getter=lambda: camera_exposure(self._config),
+            overlay_config_getter=lambda: self._config.get("overlay", {}),
         )
 
     def _on_control_clicked(self):
@@ -490,6 +508,8 @@ class ConfigWindow(QMainWindow):
             session.pose_warning.connect(self._on_pose_warning)
         if hasattr(session, "camera_status"):
             session.camera_status.connect(self._on_camera_status)
+        if hasattr(session, "overlay_message"):
+            session.overlay_message.connect(self.control_label.setText)
         ok, message = session.start()
         if not ok:
             self.control_label.setText(message)

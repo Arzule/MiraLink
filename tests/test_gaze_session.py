@@ -31,7 +31,7 @@ def feed(session, t0, duration, fps=30.0, valid=True):
 
 class TestValidationPhase(unittest.TestCase):
     def test_validation_points_form_a_central_rectangle(self):
-        from calibration import CALIBRATION_LAYOUT, CALIBRATION_MARGIN, calibration_points
+        from calibration import CALIBRATION_MARGIN
 
         val = validation_points(W, H)
         self.assertEqual(len(val), 5)
@@ -41,7 +41,7 @@ class TestValidationPhase(unittest.TestCase):
         self.assertAlmostEqual((xs[0] + xs[1]) / 2, W / 2)
         self.assertAlmostEqual((ys[0] + ys[1]) / 2, H / 2)
         self.assertEqual(val[2], (W / 2, H / 2))  # y su centro
-        calib = calibration_points(W, H, CALIBRATION_MARGIN, CALIBRATION_LAYOUT)
+        calib = grid_points(W, H, CALIBRATION_MARGIN)
         for p in corners:  # las esquinas son puntos nuevos, lejos de la calibración
             self.assertNotIn(p, calib)
             self.assertGreater(min(np.hypot(p[0] - g[0], p[1] - g[1]) for g in calib), 0.1 * H)

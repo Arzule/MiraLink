@@ -135,8 +135,21 @@ def magnetic_snap(
     la atracción sea suave y no dependa de la tasa de cuadros. Sin controles, radio <= 0 o fuera del
     radio devuelve la posición sin cambios. Pensada para los botones del overlay (etapa 5).
     """
-    if snap_radius_px <= 0.0 or strength <= 0.0 or not targets:
+    if strength <= 0.0:
         return float(pos[0]), float(pos[1])
+    center = snap_center(pos, targets, snap_radius_px)
+    if center is None:
+        return float(pos[0]), float(pos[1])
+    k = min(1.0, float(strength))
+    cx, cy = center
+    return pos[0] + k * (cx - pos[0]), pos[1] + k * (cy - pos[1])
+
+
+def snap_center(pos: Tuple[float, float], targets: Sequence[Rect], snap_radius_px: float) -> Optional[Tuple[float, float]]:
+    """Centro del control que atrae a `pos` (borde a <= snap_radius_px, o dentro; en empate el centro más
+    cercano) o None si ninguno."""
+    if snap_radius_px <= 0.0 or not targets:
+        return None
     best = None
     for rect in targets:
         d = distance_to_rect(pos, rect)
@@ -145,11 +158,7 @@ def magnetic_snap(
             center_d = math.hypot(cx - pos[0], cy - pos[1])
             if best is None or (d, center_d) < best[0]:
                 best = ((d, center_d), (cx, cy))
-    if best is None:
-        return float(pos[0]), float(pos[1])
-    k = min(1.0, float(strength))
-    cx, cy = best[1]
-    return pos[0] + k * (cx - pos[0]), pos[1] + k * (cy - pos[1])
+    return None if best is None else best[1]
 
 
 def apply_deadzone(shown: Optional[Tuple[float, float]], target: Tuple[float, float], radius: float) -> Tuple[float, float]:

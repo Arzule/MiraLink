@@ -5,6 +5,10 @@ fábricas inyectables para poder probar la orquestación sin hardware.
 
 "Recentrar" (botón o Ctrl+Alt+R) reutiliza el mismo tracker: mientras la pantalla del punto central
 está abierta, los cuadros van a ella y el cursor no se mueve.
+
+Botones flotantes (overlay_buttons, etapa 5): solo existen mientras el control está en marcha; se ocultan
+en pausa y durante Recentrar. Sus rectángulos alimentan el radio magnético del CursorController y sus
+acciones (Lupa, teclado, filtro de color) las ejecuta windows_integration.WindowsActions.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ class ControlSession(QObject):
     recentered = Signal(str)  # resultado de "Recentrar" (aplicado o motivo del fallo)
     pose_warning = Signal(str)  # aviso de deriva de la cabeza ("" = se quitó el aviso)
     camera_status = Signal(str)  # resolución y fps que entrega la cámara (al medirse y si cambian)
+    overlay_message = Signal(str)  # resultado de un botón flotante (p. ej. "Lupa: acercar")
     _hotkey_pressed = Signal()  # el hilo del atajo emite; se atiende en el hilo de la GUI
     _recenter_pressed = Signal()
 
@@ -85,6 +90,9 @@ class ControlSession(QObject):
         recenter_screen_factory: Optional[Callable[..., object]] = None,
         camera_size_getter: Callable[[], Optional[Tuple[int, int]]] = lambda: None,  # None = nativa
         camera_exposure_getter: Callable[[], str] = lambda: "auto",  # config.json camera.exposure
+        overlay_config_getter: Callable[[], dict] = lambda: {"enabled": False},  # config.json overlay
+        overlay_factory: Optional[Callable[..., object]] = None,  # (pantalla, config, on_action) -> barra
+        actions_factory: Optional[Callable[[bool], object]] = None,  # (dry_run) -> WindowsActions
     ):
         super().__init__(parent)
         self.config_getter = config_getter
@@ -100,6 +108,11 @@ class ControlSession(QObject):
         self.clock = clock
         self.camera_size_getter = camera_size_getter
         self.camera_exposure_getter = camera_exposure_getter
+        self.overlay_config_getter = overlay_config_getter
+        self._overlay_factory = overlay_factory
+        self._actions_factory = actions_factory
+        self.overlay = None
+        self.actions = None
         # Ctrl+Alt+R real solo si el atajo de pausa también es el real (los tests nunca registran el real)
         if recenter_hotkey_factory is None and hotkey_factory is None:
             recenter_hotkey_factory = default_recenter_hotkey
@@ -184,6 +197,7 @@ class ControlSession(QObject):
 
                 self._feedback_factory = CursorFeedback
             self.feedback = self._feedback_factory(dpr=float(screen.devicePixelRatio()), dry_run=self.dry_run)
+            self._create_overlay(screen)
             self.controller = CursorController(
                 mapper,
                 self.mouse,
@@ -192,6 +206,7 @@ class ControlSession(QObject):
                 origin=(geom["x"], geom["y"]),
                 config_getter=self.config_getter,
                 listener=self._on_controller_event,
+                snap_targets=self._snap_targets,
             )
             ref = getattr(mapper, "pose_ref", None)
             self.pose_monitor = PoseDriftMonitor(ref) if ref is not None else None
@@ -218,6 +233,7 @@ class ControlSession(QObject):
             self.running = True
             self.tracker.start()
             self.feedback.show()
+            self._sync_overlay()
             self._timer.start()
             self.tracker_active_changed.emit(True)
             self.paused_changed.emit(False)
@@ -225,6 +241,45 @@ class ControlSession(QObject):
         except Exception as e:  # noqa: BLE001 - no dejar piezas a medio iniciar
             self.stop()
             return False, f"No se pudo iniciar el control del cursor: {e}"
+
+    # --------------------------------------------------------- botones flotantes
+    def _create_overlay(self, screen):
+        cfg = dict(self.overlay_config_getter() or {})
+        if not cfg.get("enabled", False):
+            return
+        factory = self._actions_factory
+        if factory is None:
+            from windows_integration import WindowsActions
+
+            factory = lambda dry: WindowsActions(dry_run=dry)  # noqa: E731
+        self.actions = factory(self.dry_run)
+        overlay_factory = self._overlay_factory
+        if overlay_factory is None:
+            from overlay_buttons import make_overlay
+
+            overlay_factory = make_overlay
+        self.overlay = overlay_factory(screen, cfg, self._on_overlay_action)
+
+    def _snap_targets(self):
+        overlay = self.overlay
+        return overlay.target_rects() if overlay is not None else []
+
+    def _sync_overlay(self):
+        """Visible solo con el control en marcha, sin pausa y sin la pantalla de Recentrar."""
+        overlay = self.overlay
+        if overlay is None:
+            return
+        visible = self.running and not self.paused and self.recenter_screen is None
+        overlay.setVisible(visible)
+        if visible:
+            overlay.raise_()
+
+    def _on_overlay_action(self, action: str):
+        if self.actions is None or not self.running:
+            return
+        logger.info("Botón flotante: %s", action)
+        message = self.actions.run(action)
+        self.overlay_message.emit(message)
 
     def _start_recenter_hotkey(self):
         """Ctrl+Alt+R no es de seguridad: si no se puede registrar, se avisa y queda el botón."""
@@ -266,6 +321,7 @@ class ControlSession(QObject):
         self.recenter_screen = scr
         if self.feedback is not None:
             self.feedback.hide()
+        self._sync_overlay()
         scr.setGeometry(screen.geometry())
         scr.showFullScreen()
         scr.raise_()
@@ -282,6 +338,7 @@ class ControlSession(QObject):
             scr.deleteLater()
         if self.running and self.feedback is not None:
             self.feedback.show()
+        self._sync_overlay()
 
     def _on_recenter_completed(self, offset):
         self._close_recenter_screen()
@@ -391,6 +448,7 @@ class ControlSession(QObject):
         self.controller.set_paused(paused)
         if self.feedback is not None:
             self.feedback.update()
+        self._sync_overlay()
         self.paused_changed.emit(self.controller.paused)
 
     def toggle_pause(self):
@@ -437,5 +495,10 @@ class ControlSession(QObject):
             if feedback is not None:
                 feedback.hide()
                 feedback.deleteLater()
+            overlay, self.overlay = self.overlay, None
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
+            self.actions = None
         if was_running:
             self.tracker_active_changed.emit(False)
