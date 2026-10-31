@@ -278,7 +278,7 @@ class TestOverlayInControlSession(Base):
         self.assertTrue(ok)
         bar, button = self.overlays[0], self.desktop_buttons[0]
         self.assertEqual((bar.visible, button.visible), (False, True))
-        self.assertEqual(s.controller.snap_targets(), [(0.0, 0.0, 10.0, 10.0)])  # el imán va al botón
+        self.assertEqual(s.controller.snap_targets(), [])  # el botón del escritorio no tiene imán (scroll lateral)
         self.desktop = True
         s._on_timer()  # entre revisiones no se consulta la ventana activa (menos CPU)
         self.assertEqual((bar.visible, button.visible), (False, True))

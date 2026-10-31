@@ -291,10 +291,12 @@ class ControlSession(QObject):
 
     def _snap_targets(self):
         """Botones en las coordenadas del cursor (lo que se ve: con zoom, ampliados y desplazados)."""
-        rects = []
-        for widget in (self.overlay, self.desktop_button):
-            if widget is not None:
-                rects.extend(widget.target_rects())  # vacío si está oculto
+        # solo la barra: el botón "Ir al escritorio" no atrae el cursor (está junto a la barra de
+        # desplazamiento de las aplicaciones y el imán estorbaría al usarla)
+        overlay = self.overlay
+        if overlay is None:
+            return []
+        rects = overlay.target_rects()  # vacío si está oculta
         view = self.zoom_view
         if view is not None and view.active:
             rects = [view.rect_to_display(r) for r in rects]
