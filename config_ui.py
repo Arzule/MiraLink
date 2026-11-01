@@ -113,6 +113,21 @@ class ConfigWindow(QMainWindow):
         self.btn_control.clicked.connect(self._on_control_clicked)
         self.btn_recenter.clicked.connect(self._on_recenter_clicked)
         self.btn_save.clicked.connect(self._on_save_clicked)
+        self.help_dialog = None  # referencia fuerte a la ventana de ayuda abierta
+        self.btn_help.clicked.connect(self.open_help)
+
+    def open_help(self):
+        """Abre (o trae al frente) la guía de uso, con los valores de la configuración actual."""
+        from help_ui import HelpDialog
+
+        if self.help_dialog is not None:
+            self.help_dialog.close()
+            self.help_dialog.deleteLater()
+        self.help_dialog = HelpDialog(self._config, parent=self)
+        self.help_dialog.show()
+        self.help_dialog.raise_()
+        self.help_dialog.activateWindow()
+        return self.help_dialog
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -152,6 +167,14 @@ class ConfigWindow(QMainWindow):
         self.status_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.status_badge.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         header_layout.addWidget(self.status_badge, 0, Qt.AlignVCenter)
+
+        self.btn_help = QPushButton("Ayuda", header_frame)
+        self.btn_help.setObjectName("btn_help")
+        self.btn_help.setProperty("variant", "secondary")
+        self.btn_help.setAccessibleName("Botón ayuda: guía completa de uso")
+        self.btn_help.setToolTip("Guía completa de cómo usar MiraLink")
+        self.btn_help.setMinimumHeight(48)
+        header_layout.addWidget(self.btn_help, 0, Qt.AlignVCenter)
 
         self.scroll_layout.addWidget(header_frame)
 

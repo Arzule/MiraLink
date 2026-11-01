@@ -46,6 +46,7 @@ Nunca deben quedar tokens sin reemplazar. No usar tamaños de fuente fijos en px
 - config_ui.py: ventana de configuración en PySide6.
 - overlay_buttons.py: botones flotantes (teclado, zoom in/out, filtros de color).
 - magnifier.py: lupa propia (zoom a pantalla completa con la API de ampliación de Windows, conversión de la mirada a lo que se ve y desplazamiento con la mirada).
+- help_ui.py: ventana "Ayuda" (guía completa de uso; el texto usa los valores de la configuración actual).
 - tts_manager.py: texto a voz con pyttsx3.
 - windows_integration.py: osk.exe, atajos de la Lupa, win32gui, ms-settings.
 - styles/*.qss: temas; la UI debe cargar dinámicamente todos los .qss de esta carpeta.
@@ -326,6 +327,12 @@ Problema reportado con cámara real: desvío considerable aunque el error estima
 - Lupa: un solo nivel, 200 % (`magnifier.ZOOM_LEVELS` = (1, 2)); los botones Acercar/Alejar pasan a uno, "Lupa 200%" (acción "zoom", `ZoomView.toggle`, `ControlSession.toggle_zoom`). La barra tiene 3 botones.
 - `calibration.IOD_MIN` 0.21 -> 0.19: con la cabeza afinando no hace falta tanta precisión del iris y "Acércate" saltaba pronto. Se irá ajustando.
 - Verificado con tests y con las sesiones grabadas (conteo de parpadeos). No verificado con la cámara: velocidad del joystick, zona muerta, cambios de modo y reposo los prueba el usuario.
+
+### Ayuda (01/11, pedido del usuario)
+- Botón "Ayuda" (secundario, 48 px) en la cabecera de la ventana de configuración, junto a la insignia del rastreador. Abre `help_ui.HelpDialog`: no modal (se puede leer mientras se usa la app), una sola a la vez (`ConfigWindow.help_dialog`, referencia fuerte; reabrir la reemplaza). Índice de secciones a la izquierda (ítems de 48 px, la seleccionada con borde del color del texto del tema) y la guía en un QTextBrowser con anclas; hereda el tema de la ventana.
+- Secciones (`help_sections`): qué es, antes de empezar, calibrar, iniciar/pausar/recentrar, modo mirada y modo cabeza, clic/hold/arrastrar, reposo, botones flotantes y lupa, ajustes de la ventana, ajustes avanzados de config.json, atajos y gestos, problemas frecuentes. Los números (umbrales de parpadeo, dwell, reposo, parpadeos de cambio de modo, zona muerta, modo inicial, atajos) salen de la configuración actual al abrirla: si cambia el comportamiento, actualizar también este texto.
+- Es aparte de los avisos durante el uso (vista previa de la calibración, etiqueta de estado, indicador del cursor).
+- Verificado con tests (contenido, valores de la config, accesibilidad, 48 px, índice que desplaza el texto, mensajes de Qt salvo artefactos de offscreen) y con renders de la plataforma real en los temas oscuro y alto contraste 1. No verificado con una persona.
 
 - No empezar las etapas 5-7 sin que el usuario lo pida. El .exe ya existe (pedido por el usuario, ver "Ejecutable").
 

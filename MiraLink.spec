@@ -34,6 +34,7 @@ a = Analysis(
         "cursor_feedback",
         "gaze_session",
         "app_logging",
+        "help_ui",
         "scripts.download_model",
         "win32gui",
     ],
