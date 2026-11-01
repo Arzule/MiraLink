@@ -252,6 +252,18 @@ def run_self_test(out_path=None, show_window=True):
         tracker.close()
         return default_model_path()
 
+    def gaze_net():
+        import numpy as np
+
+        from neural_gaze import GAZE_MODELS, GazeNet
+
+        info = GAZE_MODELS["mobileone_s0"]  # red del modo híbrido; debe venir empaquetada
+        net = GazeNet(info.path, threads=1)
+        out = net.predict([np.zeros((448, 448, 3), dtype=np.uint8)])  # cara negra: solo que ejecute
+        if out.shape != (1, 2) or not np.all(np.isfinite(out)):
+            raise RuntimeError("la red devolvió valores no finitos")
+        return f"{info.path} (onnxruntime)"
+
     def window():
         from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QApplication
@@ -272,6 +284,7 @@ def run_self_test(out_path=None, show_window=True):
     check("config.json", config)
     check("temas", themes)
     check("modelo de MediaPipe", model)
+    check("red del modo híbrido", gaze_net)
     check("ventana de configuración", window)
     lines.append("RESULTADO: " + ("OK" if ok else "FALLO"))
     out_path = out_path or os.path.join(data_dir(), "miralink_selftest.txt")

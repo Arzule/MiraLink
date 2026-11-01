@@ -15,6 +15,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 datas = [(path, "styles") for path in glob.glob("styles/*.qss")]
 datas += [("models/face_landmarker.task", "models")]
+# Red de mirada del modo híbrido (tracking.gaze_model = "mobileone_s0"); ResNet-18/34 no van (130 MB y no
+# caben en tiempo real). build_exe.ps1 la descarga si falta.
+datas += [("models/mobileone_s0_gaze.onnx", "models")]
 datas += collect_data_files("mediapipe")  # recursos internos de MediaPipe (grafos, .binarypb)
 binaries = collect_dynamic_libs("mediapipe")  # DLL nativas de MediaPipe Tasks
 

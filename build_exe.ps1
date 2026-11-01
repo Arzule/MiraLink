@@ -16,6 +16,11 @@ if (-not (Test-Path "models\face_landmarker.task")) {
     & $py scripts\download_model.py
     if ($LASTEXITCODE -ne 0) { throw "No se pudo descargar models\face_landmarker.task" }
 }
+if (-not (Test-Path "models\mobileone_s0_gaze.onnx")) {
+    Write-Host "    Falta la red de mirada del modo híbrido: descargándola"
+    & $py scripts\download_gaze_models.py mobileone_s0
+    if ($LASTEXITCODE -ne 0) { throw "No se pudo descargar models\mobileone_s0_gaze.onnx" }
+}
 
 if (-not $SkipTests) {
     Write-Host "2/5 Tests"
