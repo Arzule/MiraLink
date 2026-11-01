@@ -105,3 +105,23 @@ class TestAdvancedInteractionKeys(unittest.TestCase):
         self.assertEqual(high["interaction"]["freeze_after_blink_ms"], 500)
         self.assertEqual(high["interaction"]["hold_timeout_s"], 120)
         self.assertFalse(high["interaction"]["hold_enabled"])
+
+    def test_pointer_mode_and_hybrid_keys(self):
+        from config_manager import _deep_merge, _validate_config
+
+        inter = DEFAULT_CONFIG["interaction"]
+        self.assertEqual(inter["pointer_mode"], "absolute")  # el híbrido es opcional
+        self.assertEqual(
+            (inter["head_gain_px_per_deg"], inter["hybrid_jump_px"], inter["hybrid_jump_ms"], inter["hybrid_settle_ms"]),
+            (40, 200, 100, 300),
+        )
+        ok = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {"pointer_mode": "hybrid"}}))
+        self.assertEqual(ok["interaction"]["pointer_mode"], "hybrid")
+        bad = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {
+            "pointer_mode": "relativo", "head_gain_px_per_deg": 999, "hybrid_jump_px": 1,
+            "hybrid_jump_ms": -1, "hybrid_settle_ms": "x"}}))
+        self.assertEqual(bad["interaction"]["pointer_mode"], "absolute")
+        self.assertEqual(bad["interaction"]["head_gain_px_per_deg"], 200)
+        self.assertEqual(bad["interaction"]["hybrid_jump_px"], 80)
+        self.assertEqual(bad["interaction"]["hybrid_jump_ms"], 0)
+        self.assertEqual(bad["interaction"]["hybrid_settle_ms"], 300)

@@ -7,7 +7,22 @@ falsas para los tests.
 
 Pipeline por cuadro: mediana corta de los rasgos (feature_median_window) -> mapeo -> límites de
 pantalla -> filtro One Euro con los timestamps (min_cutoff desde smoothing_percent, beta y d_cutoff
-de la configuración; ver gaze_filters) -> zona muerta (deadzone_px) -> mouse.
+de la configuración; ver gaze_filters) -> [modo híbrido] -> radio magnético -> zona muerta (deadzone_px)
+-> mouse.
+
+Modo del puntero (interaction.pointer_mode):
+- "absolute" (por defecto): el cursor es la mirada filtrada.
+- "hybrid" (la mirada para lo grueso, la cabeza para lo fino): la mirada pasa por un One Euro propio y
+  rápido (HYBRID_GAZE_CUTOFF_HZ, independiente de smoothing_percent: con un suavizado alto la mirada
+  tardaba ~1 s en llegar, el cursor se anclaba a medio camino y volvía a saltar en plena fijación; su
+  temblor no se ve porque anclado el cursor ya no sigue a la mirada). Cuando esa mirada se aleja más de
+  hybrid_jump_px del punto del último salto durante hybrid_jump_ms, el cursor salta y sigue a la mirada
+  hybrid_settle_ms. Después queda anclado: el temblor de la
+  mirada ya no lo mueve y lo mueven los giros de la cabeza (yaw y pitch de MediaPipe, suavizados), a
+  head_gain_px_per_deg px por grado: girar hacia la izquierda lo lleva a la izquierda y subir la barbilla,
+  hacia arriba. El salto se mide contra el punto donde aterrizó la mirada (no contra el cursor), así
+  afinar con la cabeza no provoca un salto de vuelta. Con el cursor congelado (parpadeo, sin cara) la
+  referencia de la cabeza se reinicia: lo que se mueva la cabeza mientras tanto no mueve el cursor.
 
 El suavizado exponencial anterior se conserva como `filter_kind="exponential"` para comparar en
 scripts/replay_session.py: alpha = 1 - 0.95 * smoothing_percent / 100 (referido a 30 fps); con
@@ -33,6 +48,12 @@ STATE_HOLD = "HOLD"
 POST_ACTION_IGNORE_S = 0.3  # tras un clic o soltar se ignoran parpadeos
 REFERENCE_FPS = 30.0
 MAX_SMOOTHING_DT_S = 0.25  # un intervalo mayor se trata como este máximo (cámara con tirones)
+POINTER_MODES = ("absolute", "hybrid")
+YAW_INDEX, PITCH_INDEX = 7, 8  # eye_tracker.FEATURE_NAMES: giro e inclinación de la cabeza (radianes)
+HEAD_MIN_CUTOFF_HZ = 1.0  # One Euro de la cabeza (en grados): ruido de 0.05-0.09° por cuadro
+HEAD_BETA = 0.3  # 1/(°/s): al girar de verdad el corte sube y el cursor responde sin retraso
+HYBRID_GAZE_CUTOFF_HZ = 1.0  # One Euro de la mirada del híbrido (como smoothing_percent ~40 %)
+HYBRID_GAZE_BETA = 0.002
 HOTKEY_LABEL = "Ctrl+Alt+P"
 RECENTER_HOTKEY_LABEL = "Ctrl+Alt+R"
 
@@ -331,6 +352,28 @@ class CursorController:
         self._last_ts: Optional[float] = None
         self._frozen = False
         self._face_found = False
+        # modo híbrido
+        self._head_euro = OneEuroFilter(HEAD_MIN_CUTOFF_HZ, HEAD_BETA, 1.0)
+        self._gaze_euro = OneEuroFilter(HYBRID_GAZE_CUTOFF_HZ, HYBRID_GAZE_BETA, 1.0)
+        self._reset_hybrid()
+
+    def _reset_hybrid(self):
+        self._cursor: Optional[Tuple[float, float]] = None  # cursor híbrido (antes del imán y la zona muerta)
+        self._jump_anchor: Optional[Tuple[float, float]] = None  # mirada donde aterrizó el último salto
+        self._far_since: Optional[float] = None
+        self._following = True  # tras un salto (y al empezar) el cursor sigue a la mirada
+        self._follow_start: Optional[float] = None
+        self._gaze_euro.reset()
+        self._reset_head()
+
+    def _reset_head(self):
+        self._head_prev = None
+        self._head_euro.reset()
+
+    @property
+    def pointer_mode(self) -> str:
+        mode = self._cfg("pointer_mode")
+        return mode if mode in POINTER_MODES else "absolute"
 
     # ------------------------------------------------------------- configuración
     def _cfg(self, key):
@@ -388,6 +431,7 @@ class CursorController:
             self._last_ts = None
             self._prev_closed = False
             self._freeze_until = -1e18
+            self._reset_hybrid()  # al reanudar el cursor vuelve a la mirada
             self._emit("resumed")
 
     def toggle_pause(self) -> bool:
@@ -439,6 +483,8 @@ class CursorController:
         self._prev_closed = closed
         frozen = (not face) or closed or ts < self._freeze_until
         self._frozen = frozen
+        if frozen:
+            self._reset_head()  # lo que se mueva la cabeza con el cursor congelado no lo mueve después
 
         # 1) parpadeo: ocurre en la posición congelada, antes de mover el cursor
         event = frame.blink_event
@@ -487,11 +533,65 @@ class CursorController:
         gx = min(max(gx, 0.0), self.width - 1.0)
         gy = min(max(gy, 0.0), self.height - 1.0)
         self.pos = self._filter(gx, gy, dt, ts)
-        shown = apply_deadzone(self.display, self._snap(self.pos, dt), float(self._cfg("deadzone_px")))
+        target = self.pos
+        if self.pointer_mode == "hybrid":
+            target = self._hybrid((gx, gy), features, ts)
+        else:
+            self._cursor = None  # al volver al híbrido empieza siguiendo a la mirada
+            self._following = True
+        shown = apply_deadzone(self.display, self._snap(target, dt), float(self._cfg("deadzone_px")))
         moved = self.display is None or abs(shown[0] - self.display[0]) >= 0.5 or abs(shown[1] - self.display[1]) >= 0.5
         if moved:
             self.display = shown
             self.mouse.move(shown[0] + self.origin[0], shown[1] + self.origin[1])
+
+    def _hybrid(self, raw_gaze: Tuple[float, float], features, ts: float) -> Tuple[float, float]:
+        """Modo híbrido (ver docstring del módulo): salto con la mirada, ajuste fino con la cabeza."""
+        g = self._gaze_euro(raw_gaze, ts)
+        gaze = (float(g[0]), float(g[1]))
+        head = None
+        try:
+            yaw, pitch = math.degrees(float(features[YAW_INDEX])), math.degrees(float(features[PITCH_INDEX]))
+            if math.isfinite(yaw) and math.isfinite(pitch):
+                h = self._head_euro((yaw, pitch), ts)
+                head = (float(h[0]), float(h[1]))
+        except (IndexError, TypeError, ValueError):
+            head = None
+        if self._cursor is None:
+            self._start_follow(gaze, ts)
+        elif not self._following:
+            anchor = self._jump_anchor or gaze
+            if math.hypot(gaze[0] - anchor[0], gaze[1] - anchor[1]) > float(self._cfg("hybrid_jump_px")):
+                if self._far_since is None:
+                    self._far_since = ts
+                if (ts - self._far_since) * 1000.0 >= float(self._cfg("hybrid_jump_ms")):
+                    self._start_follow(gaze, ts)
+                    self._emit("gaze_jump")
+            else:
+                self._far_since = None
+
+        if self._following:
+            self._cursor = gaze
+            self._jump_anchor = gaze
+            elapsed = ts - (self._follow_start if self._follow_start is not None else ts)
+            if elapsed * 1000.0 >= float(self._cfg("hybrid_settle_ms")):
+                self._following = False  # anclado: desde aquí lo mueve la cabeza
+        elif head is not None and self._head_prev is not None:
+            gain = float(self._cfg("head_gain_px_per_deg"))
+            # girar hacia la izquierda sube el yaw -> cursor a la izquierda; subir la barbilla baja el pitch
+            x = self._cursor[0] - gain * (head[0] - self._head_prev[0])
+            y = self._cursor[1] + gain * (head[1] - self._head_prev[1])
+            self._cursor = (min(max(x, 0.0), self.width - 1.0), min(max(y, 0.0), self.height - 1.0))
+        if head is not None:
+            self._head_prev = head
+        return self._cursor
+
+    def _start_follow(self, gaze: Tuple[float, float], ts: float):
+        self._cursor = gaze
+        self._jump_anchor = gaze
+        self._following = True
+        self._follow_start = ts
+        self._far_since = None
 
     def _snap(self, pos: Tuple[float, float], dt: float) -> Tuple[float, float]:
         """Radio magnético (tras el One Euro, antes de la zona muerta): mientras la mirada filtrada esté a

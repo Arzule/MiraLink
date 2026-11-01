@@ -505,6 +505,85 @@ class TestFilters(Base):
         self.assertEqual((snap.x, snap.y), (500.0, 400.0))
 
 
+class TestHybridPointer(Base):
+    """Modo híbrido: la mirada salta, la cabeza (yaw/pitch, rasgos 7 y 8) afina."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["pointer_mode"] = "hybrid"
+        self.rng = np.random.default_rng(0)
+
+    def look(self, seconds, x, y, yaw_deg=0.0, pitch_deg=0.0, noise=0.0, fps=30.0, closed=False):
+        snap = None
+        for _ in range(int(round(seconds * fps))):
+            gx, gy = x + self.rng.normal(0, noise) if noise else x, y + self.rng.normal(0, noise) if noise else y
+            f = frame(self.t, gx, gy, closed=closed)
+            f.features[7], f.features[8] = np.radians(yaw_deg), np.radians(pitch_deg)
+            snap = self.ctl.update(f)
+            self.t += 1.0 / fps
+        return snap
+
+    def test_anchored_cursor_ignores_gaze_jitter(self):
+        self.look(1.0, 800, 500)
+        xs = []
+        for _ in range(60):
+            snap = self.look(1 / 30, 800, 500, noise=40.0)
+            xs.append((snap.x, snap.y))
+        xs = np.array(xs)
+        self.assertLess(np.ptp(xs[:, 0]), 15.0)  # la mirada tiembla ±40 px; el cursor casi no
+        self.assertLess(np.linalg.norm(xs.mean(axis=0) - (800, 500)), 30.0)
+
+    def test_absolute_mode_follows_the_gaze(self):
+        self.cfg["pointer_mode"] = "absolute"
+        self.look(0.5, 800, 500)
+        snap = self.look(1 / 30, 880, 500)
+        self.assertEqual(snap.x, 880.0)  # sin filtros: sigue la mirada al momento
+
+    def test_head_turn_moves_cursor_finely(self):
+        self.look(1.0, 800, 500)
+        start = self.ctl.screen_pos()
+        snap = self.look(1.0, 800, 500, yaw_deg=2.0)  # gira 2° hacia su izquierda
+        self.assertAlmostEqual(snap.x, start[0] - 2.0 * 40, delta=4.0)
+        self.assertAlmostEqual(snap.y, start[1], delta=1.0)
+        snap = self.look(1.0, 800, 500, yaw_deg=2.0, pitch_deg=-1.5)  # sube la barbilla
+        self.assertAlmostEqual(snap.y, start[1] - 1.5 * 40, delta=4.0)
+        self.cfg["head_gain_px_per_deg"] = 10  # la ganancia se aplica en vivo
+        snap2 = self.look(1.0, 800, 500, yaw_deg=3.0, pitch_deg=-1.5)
+        self.assertAlmostEqual(snap2.x, snap.x - 10.0, delta=2.0)
+
+    def test_gaze_jump_far_away_but_not_for_small_shifts(self):
+        self.look(1.0, 800, 500)
+        snap = self.look(0.5, 950, 500)  # 150 px (< 200): p. ej. la mirada movida por el giro de la cabeza
+        self.assertAlmostEqual(snap.x, 800.0, delta=1.0)
+        self.assertNotIn("gaze_jump", self.events)
+        snap = self.look(1 / 30 * 2, 1500, 700)  # un vistazo de 66 ms (< hybrid_jump_ms) no salta
+        self.assertAlmostEqual(snap.x, 800.0, delta=1.0)
+        snap = self.look(0.6, 1500, 700)
+        self.assertAlmostEqual(snap.x, 1500.0, delta=8.0)  # aterriza con la mirada (filtro rápido)
+        self.assertAlmostEqual(snap.y, 700.0, delta=8.0)
+        self.assertEqual(self.events.count("gaze_jump"), 1)
+        # tras el salto queda anclado de nuevo: la mirada a 150 px no lo mueve
+        landed = snap.x
+        snap = self.look(0.5, 1350, 700)
+        self.assertAlmostEqual(snap.x, landed, delta=1.0)
+
+    def test_head_motion_while_frozen_does_not_move_cursor(self):
+        self.look(1.0, 800, 500)
+        before = self.ctl.screen_pos()
+        self.look(0.3, 800, 500, yaw_deg=4.0, closed=True)  # parpadeo con la cabeza moviéndose
+        snap = self.look(0.6, 800, 500, yaw_deg=4.0)
+        self.assertAlmostEqual(snap.x, before[0], delta=1.0)
+
+    def test_cursor_is_clamped_and_resume_returns_to_gaze(self):
+        self.look(1.0, 30, 500)
+        snap = self.look(1.0, 30, 500, yaw_deg=10.0)  # 400 px a la izquierda: tope en el borde
+        self.assertEqual(snap.x, 0.0)
+        self.ctl.set_paused(True)
+        self.ctl.set_paused(False)
+        snap = self.look(0.5, 900, 300, yaw_deg=10.0)
+        self.assertEqual((snap.x, snap.y), (900.0, 300.0))
+
+
 class TestBackends(unittest.TestCase):
     def test_pyautogui_mouse_configures_and_forwards(self):
         class FakePG:

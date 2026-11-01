@@ -553,6 +553,11 @@ class ControlSession(QObject):
     def _check_pose(self, frame):
         """Aviso de deriva: compara la pose de la cabeza con la de la calibración."""
         monitor = self.pose_monitor
+        if getattr(self.controller, "pointer_mode", "absolute") == "hybrid":
+            # en el modo híbrido girar la cabeza es como se afina el cursor: no es una deriva
+            if self._pose_warning_shown:
+                self._set_pose_warning("")
+            return
         features = getattr(frame, "features", None)
         if monitor is None or not getattr(frame, "face_found", False) or features is None:
             return

@@ -34,6 +34,12 @@ DEFAULT_CONFIG = {
         "deadzone_px": 4,
         # radio magnético de los botones flotantes (px físicos desde el borde del botón; 0 = desactivado)
         "snap_radius_px": 60,
+        # puntero: "absolute" (el cursor sigue la mirada) o "hybrid" (la mirada salta, la cabeza afina)
+        "pointer_mode": "absolute",
+        "head_gain_px_per_deg": 40,  # híbrido: px físicos que se mueve el cursor por grado de giro de la cabeza
+        "hybrid_jump_px": 200,  # híbrido: la mirada salta si se aleja más que esto del punto del último salto
+        "hybrid_jump_ms": 100,  # híbrido: durante cuánto tiempo seguido (filtra picos)
+        "hybrid_settle_ms": 300,  # híbrido: tras un salto el cursor sigue a la mirada este tiempo mínimo
     },
     # eye: con qué ojo se sigue la mirada y se detectan los parpadeos. "auto" = en cada calibración se elige
     # el de menor temblor (entre los de error parecido); "right"/"left"/"both" lo fuerzan.
@@ -49,6 +55,7 @@ EYE_MODES = ("auto", "both", "right", "left")  # como calibration.EYE_MODES (sin
 SELECTED_EYES = ("both", "right", "left")
 # Mirada: "iris" (solo MediaPipe) o una red de neural_gaze.GAZE_MODELS combinada con el iris (híbrido)
 GAZE_MODEL_CHOICES = ("iris", "mobileone_s0", "resnet18", "resnet34")
+POINTER_MODES = ("absolute", "hybrid")  # como cursor_control.POINTER_MODES
 
 
 def _get_project_root():
@@ -158,6 +165,10 @@ def _validate_config(config):
         ("feature_median_window", 1, 9),
         ("deadzone_px", 0, 50),
         ("snap_radius_px", 0, 300),
+        ("head_gain_px_per_deg", 5, 200),
+        ("hybrid_jump_px", 80, 600),
+        ("hybrid_jump_ms", 0, 500),
+        ("hybrid_settle_ms", 0, 1000),
     ):
         try:
             inter[key] = _clamp(int(inter.get(key, DEFAULT_CONFIG["interaction"][key])), lo, hi)
@@ -172,6 +183,8 @@ def _validate_config(config):
             inter[key] = _clamp(value, lo, hi)
         except Exception:
             inter[key] = DEFAULT_CONFIG["interaction"][key]
+    if inter.get("pointer_mode") not in POINTER_MODES:
+        inter["pointer_mode"] = DEFAULT_CONFIG["interaction"]["pointer_mode"]
     if not isinstance(inter.get("hold_enabled"), bool):
         inter["hold_enabled"] = bool(DEFAULT_CONFIG["interaction"]["hold_enabled"])
 

@@ -765,6 +765,25 @@ class TestControlSessionRecenter(QtBase):
         self.assertEqual(warnings[-1], "")
         s.stop()
 
+    def test_hybrid_pointer_has_no_head_drift_warning(self):
+        s = self.make_session()
+        warnings = []
+        s.pose_warning.connect(warnings.append)
+        self.assertTrue(s.start()[0])
+        cx, cy = self.geom["width"] / 2, self.geom["height"] / 2
+        t = 0.0
+        for k in range(180):  # 2 s quieto y luego 4 s con la cabeza inclinada
+            f = self.gaze_frame(t, (cx, cy))
+            f.features = f.features.copy()
+            f.features[8] += 0.06 if k >= 60 else 0.0
+            if k == 75:
+                self.assertEqual(len(warnings), 0)
+                self.cfg["pointer_mode"] = "hybrid"  # con el aviso a punto de salir se cambia de modo
+            self.tracker.frame_ready.emit(f)
+            t += 1 / 30
+        self.assertEqual(warnings, [])  # en el híbrido girar la cabeza es como se afina: no es deriva
+        s.stop()
+
     def test_injected_pause_hotkey_never_creates_real_recenter_hotkey(self):
         s = self.make_session(with_recenter_factory=False)
         self.assertTrue(s.start()[0])
