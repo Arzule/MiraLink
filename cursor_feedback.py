@@ -32,7 +32,14 @@ EVENT_LABELS = {
     "hold_timeout": "Soltado (tiempo máximo)",
     "paused": "Pausado",
     "resumed": "Reanudado",
+    "mode_hybrid": "Modo cabeza",
+    "mode_absolute": "Modo mirada",
+    "sleep": "En reposo",
+    "wake": "Control activo",
 }
+# estos se muestran también fuera de --dry-run (la persona debe saber en qué modo está)
+STATUS_EVENTS = ("mode_hybrid", "mode_absolute", "sleep", "wake")
+STATUS_LABEL_S = 1.5
 
 
 class CursorFeedback(QWidget):
@@ -47,6 +54,7 @@ class CursorFeedback(QWidget):
         self._flash_start: Optional[float] = None
         self._label: Optional[str] = None
         self._label_start = 0.0
+        self._label_status = False
         self.warning: Optional[str] = None  # aviso persistente junto al cursor (deriva de la cabeza)
         self.setWindowFlags(
             Qt.FramelessWindowHint
@@ -93,9 +101,10 @@ class CursorFeedback(QWidget):
         now = self.clock()
         if event_name == "click":
             self._flash_start = now
-        if self.dry_run and event_name in EVENT_LABELS:
+        if (self.dry_run and event_name in EVENT_LABELS) or event_name in STATUS_EVENTS:
             self._label = EVENT_LABELS[event_name]
             self._label_start = now
+            self._label_status = event_name in STATUS_EVENTS
         if self._flash_start is not None or self._label is not None:
             self._anim.start()
         self.update()
@@ -109,7 +118,7 @@ class CursorFeedback(QWidget):
         now = self.clock()
         if self._flash_start is not None and not self.flash_active(now):
             self._flash_start = None
-        if self._label is not None and now - self._label_start > DRY_LABEL_S:
+        if self._label is not None and now - self._label_start > (STATUS_LABEL_S if self._label_status else DRY_LABEL_S):
             self._label = None
         if self._flash_start is None and self._label is None:
             self._anim.stop()
@@ -122,6 +131,11 @@ class CursorFeedback(QWidget):
         c = QPointF(self.SIZE / 2, self.SIZE / 2)
         s = self.snapshot
         if s.paused:
+            p.end()
+            return
+        if s.sleeping:  # en reposo no se dibuja nada salvo el aviso breve de "En reposo"
+            if self._label:
+                self._paint_label(p)
             p.end()
             return
         if self.dry_run:  # mira en la posición virtual
@@ -162,12 +176,21 @@ class CursorFeedback(QWidget):
             p.drawRoundedRect(box, 8, 8)
             p.setPen(WARNING)
             p.drawText(box, Qt.AlignCenter, self.warning)
-        if self._label and self.dry_run:
-            f = QFont()
-            f.setFamilies(["Inter", "Segoe UI"])
-            f.setPointSizeF(10.0)
-            f.setBold(True)
-            p.setFont(f)
-            p.setPen(TEXT)
-            p.drawText(QRectF(0, self.SIZE - 30, self.SIZE, 24), Qt.AlignCenter, f"[simulación] {self._label}")
+        if self._label and (self.dry_run or self._label_status):
+            self._paint_label(p)
         p.end()
+
+    def _paint_label(self, p: QPainter):
+        f = QFont()
+        f.setFamilies(["Inter", "Segoe UI"])
+        f.setPointSizeF(10.0)
+        f.setBold(True)
+        p.setFont(f)
+        box = QRectF(0, self.SIZE - 30, self.SIZE, 24)
+        if self._label_status:  # fondo para que se lea sobre cualquier ventana
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(16, 16, 25, 210))
+            p.drawRoundedRect(box.adjusted(4, 0, -4, 0), 8, 8)
+        p.setPen(TEXT)
+        text = self._label if self._label_status and not self.dry_run else f"[simulación] {self._label}"
+        p.drawText(box, Qt.AlignCenter, text)

@@ -34,12 +34,22 @@ DEFAULT_CONFIG = {
         "deadzone_px": 4,
         # radio magnético de los botones flotantes (px físicos desde el borde del botón; 0 = desactivado)
         "snap_radius_px": 60,
-        # puntero: "absolute" (el cursor sigue la mirada) o "hybrid" (la mirada salta, la cabeza afina)
+        # puntero: "absolute" (el cursor sigue la mirada) o "hybrid" (la mirada salta, la cabeza afina).
+        # Es el modo con el que arranca el control; 3 parpadeos cortos en 2 s lo alternan en vivo.
         "pointer_mode": "absolute",
-        "head_gain_px_per_deg": 40,  # híbrido: px físicos que se mueve el cursor por grado de giro de la cabeza
-        "hybrid_jump_px": 200,  # híbrido: la mirada salta si se aleja más que esto del punto del último salto
+        "mode_blinks": 3,  # parpadeos cortos (< blink_click_ms) seguidos que alternan el modo
+        "mode_blink_window_ms": 2000,  # ... dentro de esta ventana
+        # híbrido, como un joystick: giro de la cabeza respecto a la pose del último salto; dentro de la zona
+        # muerta no se mueve; fuera, velocidad = head_speed_px_s_per_deg por grado más allá de la zona
+        "head_deadzone_deg": 5.0,
+        "head_speed_px_s_per_deg": 15.0,
+        "hybrid_jump_px": 250,  # híbrido: la mirada salta si se aleja más que esto del punto del último salto
         "hybrid_jump_ms": 100,  # híbrido: durante cuánto tiempo seguido (filtra picos)
         "hybrid_settle_ms": 300,  # híbrido: tras un salto el cursor sigue a la mirada este tiempo mínimo
+        # reposo: cerrar los ojos >= sleep_close_ms desactiva el cursor (la cámara sigue); estando en reposo,
+        # cerrarlos >= wake_close_ms lo vuelve a activar (para leer o ver un video sin que el cursor estorbe)
+        "sleep_close_ms": 2000,
+        "wake_close_ms": 1000,
     },
     # eye: con qué ojo se sigue la mirada y se detectan los parpadeos. "auto" = en cada calibración se elige
     # el de menor temblor (entre los de error parecido); "right"/"left"/"both" lo fuerzan.
@@ -165,17 +175,25 @@ def _validate_config(config):
         ("feature_median_window", 1, 9),
         ("deadzone_px", 0, 50),
         ("snap_radius_px", 0, 300),
-        ("head_gain_px_per_deg", 5, 200),
+        ("mode_blinks", 2, 6),
+        ("mode_blink_window_ms", 800, 5000),
         ("hybrid_jump_px", 80, 600),
         ("hybrid_jump_ms", 0, 500),
         ("hybrid_settle_ms", 0, 1000),
+        ("sleep_close_ms", 1000, 10000),
+        ("wake_close_ms", 500, 5000),
     ):
         try:
             inter[key] = _clamp(int(inter.get(key, DEFAULT_CONFIG["interaction"][key])), lo, hi)
         except Exception:
             inter[key] = DEFAULT_CONFIG["interaction"][key]
     # filtro One Euro (flotantes con clamp; no finitos -> valor por defecto)
-    for key, lo, hi in (("one_euro_beta", 0.0, 1.0), ("one_euro_d_cutoff", 0.1, 10.0)):
+    for key, lo, hi in (
+        ("one_euro_beta", 0.0, 1.0),
+        ("one_euro_d_cutoff", 0.1, 10.0),
+        ("head_deadzone_deg", 0.0, 20.0),
+        ("head_speed_px_s_per_deg", 1.0, 200.0),
+    ):
         try:
             value = float(inter.get(key, DEFAULT_CONFIG["interaction"][key]))
             if value != value or value in (float("inf"), float("-inf")):

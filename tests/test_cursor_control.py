@@ -67,7 +67,14 @@ def blink(end_ts, duration_ms):
     return BlinkEvent(start_ts=end_ts - duration_ms / 1000.0, end_ts=end_ts, duration_ms=duration_ms)
 
 
+# El dwell (y el hold) solo existe en el modo híbrido. Con estos valores el híbrido salta a cada
+# movimiento y, con smoothing 0, sigue la mirada exacta: la máquina de estados se prueba como antes.
+DWELL_MODE = {"pointer_mode": "hybrid", "hybrid_jump_px": 1, "hybrid_jump_ms": 0, "hybrid_settle_ms": 0}
+
+
 class Base(unittest.TestCase):
+    DWELL_MODE = False
+
     def setUp(self):
         self.mouse = FakeMouse()
         self.cfg = dict(DEFAULT_CONFIG["interaction"])
@@ -75,6 +82,8 @@ class Base(unittest.TestCase):
         self.cfg["smoothing_percent"] = 0
         self.cfg["feature_median_window"] = 1
         self.cfg["deadzone_px"] = 0
+        if self.DWELL_MODE:
+            self.cfg.update(DWELL_MODE)
         self.events = []
         self.ctl = CursorController(
             IdentityMapper(), self.mouse, W, H, config_getter=lambda: self.cfg,
@@ -172,6 +181,8 @@ class TestBlinks(Base):
 
 
 class TestDwellAndHold(Base):
+    DWELL_MODE = True
+
     def test_full_dwell_pressed_then_drag_then_blink_releases(self):
         self.hold_gaze(1.0)  # < 1200 ms
         self.assertEqual(self.mouse.names(), [])
@@ -264,6 +275,8 @@ class TestDwellAndHold(Base):
 
 
 class TestPauseAndSafety(Base):
+    DWELL_MODE = True
+
     def test_pause_releases_hold_and_ignores_everything_then_resume_idle(self):
         self.hold_gaze(1.4)
         self.assertTrue(self.mouse.is_down)
@@ -462,7 +475,7 @@ class TestFilters(Base):
         self.assertEqual(len([e for e in self.mouse.events if e[0] == "move"]), 2)
 
     def test_deadzone_keeps_dwell_stable_under_jitter(self):
-        self.make(deadzone_px=6, smoothing_percent=40)
+        self.make(deadzone_px=6, smoothing_percent=40, pointer_mode="hybrid")
         rng = np.random.default_rng(3)
         t = 0.0
         snap = None
@@ -539,49 +552,119 @@ class TestHybridPointer(Base):
         snap = self.look(1 / 30, 880, 500)
         self.assertEqual(snap.x, 880.0)  # sin filtros: sigue la mirada al momento
 
-    def test_head_turn_moves_cursor_finely(self):
+    def test_head_is_a_joystick_with_deadzone_and_low_speed(self):
         self.look(1.0, 800, 500)
         start = self.ctl.screen_pos()
-        snap = self.look(1.0, 800, 500, yaw_deg=2.0)  # gira 2° hacia su izquierda
-        self.assertAlmostEqual(snap.x, start[0] - 2.0 * 40, delta=4.0)
+        snap = self.look(1.0, 800, 500, yaw_deg=4.0)  # dentro de la zona muerta de 5°: no se mueve
+        self.assertEqual((snap.x, snap.y), start)
+        snap = self.look(1.0, 800, 500, yaw_deg=7.0)  # 2° más allá: 15 px/s por grado -> ~30 px en 1 s
+        self.assertAlmostEqual(snap.x, start[0] - 30.0, delta=5.0)  # girar a su izquierda -> izquierda
         self.assertAlmostEqual(snap.y, start[1], delta=1.0)
-        snap = self.look(1.0, 800, 500, yaw_deg=2.0, pitch_deg=-1.5)  # sube la barbilla
-        self.assertAlmostEqual(snap.y, start[1] - 1.5 * 40, delta=4.0)
-        self.cfg["head_gain_px_per_deg"] = 10  # la ganancia se aplica en vivo
-        snap2 = self.look(1.0, 800, 500, yaw_deg=3.0, pitch_deg=-1.5)
-        self.assertAlmostEqual(snap2.x, snap.x - 10.0, delta=2.0)
+        x1 = snap.x
+        snap = self.look(1.0, 800, 500, yaw_deg=0.0)  # vuelve al centro: se queda donde lo dejó
+        self.assertAlmostEqual(snap.x, x1, delta=2.0)
+        snap = self.look(1.0, 800, 500, pitch_deg=-8.0)  # sube la barbilla 3° más allá: ~45 px arriba
+        self.assertAlmostEqual(snap.y, start[1] - 45.0, delta=6.0)
+        self.cfg["head_speed_px_s_per_deg"] = 30.0  # la sensibilidad se aplica en vivo
+        y1 = snap.y
+        snap = self.look(1.0, 800, 500, pitch_deg=-8.0)
+        self.assertAlmostEqual(snap.y, y1 - 90.0, delta=6.0)
 
-    def test_gaze_jump_far_away_but_not_for_small_shifts(self):
+    def test_no_gaze_jump_while_head_is_steering(self):
         self.look(1.0, 800, 500)
-        snap = self.look(0.5, 950, 500)  # 150 px (< 200): p. ej. la mirada movida por el giro de la cabeza
-        self.assertAlmostEqual(snap.x, 800.0, delta=1.0)
+        self.look(0.5, 800, 500, yaw_deg=8.0)
+        snap = self.look(0.5, 1300, 500, yaw_deg=8.0)  # girar la cabeza desplaza la mirada estimada
         self.assertNotIn("gaze_jump", self.events)
-        snap = self.look(1 / 30 * 2, 1500, 700)  # un vistazo de 66 ms (< hybrid_jump_ms) no salta
-        self.assertAlmostEqual(snap.x, 800.0, delta=1.0)
-        snap = self.look(0.6, 1500, 700)
-        self.assertAlmostEqual(snap.x, 1500.0, delta=8.0)  # aterriza con la mirada (filtro rápido)
-        self.assertAlmostEqual(snap.y, 700.0, delta=8.0)
-        self.assertEqual(self.events.count("gaze_jump"), 1)
-        # tras el salto queda anclado de nuevo: la mirada a 150 px no lo mueve
-        landed = snap.x
-        snap = self.look(0.5, 1350, 700)
-        self.assertAlmostEqual(snap.x, landed, delta=1.0)
+        self.assertLess(snap.x, 800.0)
+        snap = self.look(0.6, 1300, 500, yaw_deg=0.0)  # con la cabeza en el centro, la mirada salta
+        self.assertIn("gaze_jump", self.events)
+        self.assertAlmostEqual(snap.x, 1300.0, delta=1.0)
 
     def test_head_motion_while_frozen_does_not_move_cursor(self):
         self.look(1.0, 800, 500)
         before = self.ctl.screen_pos()
-        self.look(0.3, 800, 500, yaw_deg=4.0, closed=True)  # parpadeo con la cabeza moviéndose
-        snap = self.look(0.6, 800, 500, yaw_deg=4.0)
-        self.assertAlmostEqual(snap.x, before[0], delta=1.0)
+        snap = self.look(0.5, 800, 500, yaw_deg=12.0, closed=True)  # ojos cerrados: congelado
+        self.assertEqual((snap.x, snap.y), before)
 
     def test_cursor_is_clamped_and_resume_returns_to_gaze(self):
         self.look(1.0, 30, 500)
-        snap = self.look(1.0, 30, 500, yaw_deg=10.0)  # 400 px a la izquierda: tope en el borde
+        snap = self.look(1.0, 30, 500, yaw_deg=25.0)  # 20° más allá: 300 px a la izquierda, tope en 0
         self.assertEqual(snap.x, 0.0)
         self.ctl.set_paused(True)
         self.ctl.set_paused(False)
-        snap = self.look(0.5, 900, 300, yaw_deg=10.0)
+        snap = self.look(0.5, 900, 300, yaw_deg=25.0)
         self.assertEqual((snap.x, snap.y), (900.0, 300.0))
+
+
+class TestModesAndSleep(Base):
+    """3 parpadeos cortos alternan el modo; dwell solo en el híbrido; ojos cerrados 2 s = reposo."""
+
+    def test_three_short_blinks_toggle_mode(self):
+        self.hold_gaze(0.5)
+        self.assertEqual(self.ctl.pointer_mode, "absolute")
+        for _ in range(3):
+            self.do_blink(120)  # parpadeos normales (< blink_click_ms = 250)
+            self.hold_gaze(0.3)
+        self.assertEqual(self.ctl.pointer_mode, "hybrid")
+        self.assertIn("mode_hybrid", self.events)
+        self.assertEqual(self.mouse.names(), [])  # ningún clic
+        for _ in range(3):
+            self.do_blink(120)
+            self.hold_gaze(0.3)
+        self.assertEqual(self.ctl.pointer_mode, "absolute")
+        self.assertEqual(self.ctl.snapshot().pointer_mode, "absolute")
+
+    def test_slow_or_interrupted_blinks_do_not_toggle(self):
+        self.hold_gaze(0.5)
+        for _ in range(3):  # uno cada 1.1 s: nunca 3 dentro de 2 s
+            self.do_blink(120)
+            self.hold_gaze(1.0)
+        self.do_blink(120)
+        self.hold_gaze(0.3)
+        self.do_blink(300)  # un clic entre medias reinicia la cuenta
+        self.hold_gaze(0.4)
+        self.do_blink(120)
+        self.hold_gaze(0.2)
+        self.assertEqual(self.ctl.pointer_mode, "absolute")
+        self.assertEqual(self.mouse.names(), ["click"])
+
+    def test_no_dwell_in_absolute_mode(self):
+        snap = self.hold_gaze(2.0)  # más que dwell_hold_ms quieto
+        self.assertNotEqual(snap.state, STATE_HOLD)
+        self.assertEqual(snap.dwell_elapsed_ms, 0.0)
+        self.assertEqual(self.mouse.names(), [])
+        self.ctl.set_pointer_mode("hybrid")
+        self.hold_gaze(1.6)
+        self.assertEqual(self.mouse.names(), ["down"])  # en el híbrido sí
+
+    def test_long_closure_sleeps_and_one_second_wakes(self):
+        self.hold_gaze(0.5)
+        self.do_blink(2100)
+        self.assertTrue(self.ctl.sleeping)
+        self.assertIn("sleep", self.events)
+        snap = self.hold_gaze(0.5, x=1500, y=900)
+        self.assertEqual((snap.x, snap.y), (500.0, 400.0))  # en reposo el cursor no se mueve
+        self.assertTrue(snap.sleeping)
+        self.do_blink(300, x=1500, y=900)  # ni clics
+        for _ in range(3):  # ni cambios de modo
+            self.do_blink(120, x=1500, y=900)
+            self.hold_gaze(0.2, x=1500, y=900)
+        self.assertEqual(self.mouse.names(), [])
+        self.assertEqual(self.ctl.pointer_mode, "absolute")
+        self.do_blink(1100, x=1500, y=900)  # 1 s cerrados: vuelve
+        self.assertFalse(self.ctl.sleeping)
+        self.assertIn("wake", self.events)
+        snap = self.hold_gaze(0.5, x=1500, y=900)
+        self.assertEqual((snap.x, snap.y), (1500.0, 900.0))
+        self.assertEqual(self.mouse.names(), [])  # despertar no hace clic
+
+    def test_sleep_releases_hold(self):
+        self.cfg.update(DWELL_MODE)
+        self.hold_gaze(1.6)
+        self.assertTrue(self.ctl.holding)
+        self.do_blink(2100)
+        self.assertTrue(self.ctl.sleeping)
+        self.assertFalse(self.mouse.is_down)
 
 
 class TestBackends(unittest.TestCase):

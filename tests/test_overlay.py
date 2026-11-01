@@ -103,9 +103,10 @@ class TestOverlayBar(unittest.TestCase):
             self.assertEqual(btn.focusPolicy(), Qt.NoFocus)
         self.assertTrue(bar.windowFlags() & Qt.WindowDoesNotAcceptFocus)
         self.assertTrue(bar.windowFlags() & Qt.WindowStaysOnTopHint)
-        bar.buttons["zoom_in"].click()
+        self.assertEqual(list(bar.buttons)[0], "zoom")  # la lupa: un solo botón (200 %)
+        bar.buttons["zoom"].click()
         bar.buttons["keyboard"].click()
-        self.assertEqual(got, ["zoom_in", "keyboard"])
+        self.assertEqual(got, ["zoom", "keyboard"])
         bar.close()
 
     def test_placed_at_the_edge_and_rects_in_physical_pixels(self):
@@ -340,6 +341,26 @@ class TestOverlayInControlSession(Base):
                 self.assertEqual(wi.foreground_is_desktop(), expected, cls)
             fake.GetForegroundWindow.return_value = 0
             self.assertTrue(wi.foreground_is_desktop())
+
+    def test_sleep_hides_buttons_and_mode_changes_are_announced(self):
+        s = self.make_overlay_session()
+        s.start()
+        messages = []
+        s.overlay_message.connect(messages.append)
+        bar = self.overlays[0]
+        self.assertTrue(bar.visible)
+        s.controller._sleep(1.0)  # ojos cerrados >= 2 s
+        self.assertFalse(bar.visible)  # en reposo no hay botones (ni imán)
+        self.assertFalse(self.desktop_buttons[0].visible)
+        self.assertIn("reposo", messages[-1])
+        s.controller._wake(2.0)
+        self.assertTrue(bar.visible)
+        self.assertIn("activo", messages[-1])
+        s.controller.set_pointer_mode("absolute")
+        self.assertIn("Modo mirada", messages[-1])
+        s.controller.set_pointer_mode("hybrid")
+        self.assertIn("Modo cabeza", messages[-1])
+        s.stop()
 
     def test_disabled_overlay_is_not_created(self):
         s = self.make_overlay_session(enabled=False)

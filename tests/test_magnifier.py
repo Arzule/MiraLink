@@ -29,8 +29,7 @@ class TestZoomView(unittest.TestCase):
         v = mg.ZoomView(W, H)
         self.assertFalse(v.active)
         self.assertEqual(v.to_desktop(100, 200), (100, 200))
-        self.assertTrue(v.zoom_in())
-        self.assertEqual(v.zoom, 1.5)
+        self.assertEqual(mg.ZOOM_LEVELS, (1.0, 2.0))  # la lupa solo tiene 200 %
         self.assertTrue(v.zoom_in())
         self.assertEqual(v.zoom, 2.0)
         self.assertEqual(v.view_rect(), (640.0, 360.0, 1280.0, 720.0))  # centrada
@@ -39,15 +38,18 @@ class TestZoomView(unittest.TestCase):
         for p in ((10.0, 20.0), (2000.0, 1300.0)):
             self.assertEqual(v.to_display(*v.to_desktop(*p)), p)
         self.assertEqual(v.rect_to_display((640.0, 360.0, 100.0, 50.0)), (0.0, 0.0, 200.0, 100.0))
-        v.zoom_in()
-        self.assertFalse(v.zoom_in())  # 3x es el máximo
+        self.assertFalse(v.zoom_in())  # 2x es el máximo
+        self.assertTrue(v.toggle())  # el botón "Lupa 200%" lo quita...
+        self.assertEqual(v.zoom, 1.0)
+        self.assertTrue(v.toggle())  # ... y lo vuelve a poner
+        self.assertEqual(v.zoom, 2.0)
         self.assertTrue(v.reset())
         self.assertEqual((v.zoom, v.ox, v.oy), (1.0, 0.0, 0.0))
         self.assertFalse(v.zoom_out())
 
     def test_pan_after_delay_towards_the_edge_and_clamped(self):
         v = mg.ZoomView(W, H)
-        v.set_level(2)  # 2x, vista en (640, 360)
+        v.set_level(1)  # 2x, vista en (640, 360)
         right_edge = (W - 5.0, H / 2)
         self.assertFalse(v.update_pan(right_edge, 0.2))  # todavía un vistazo
         self.assertTrue(v.update_pan(right_edge, 0.25))
@@ -80,7 +82,7 @@ class TestZoomView(unittest.TestCase):
         zm = mg.ZoomedMouse(inner, v, origin=(0, 0))
         zm.move(100, 100)
         self.assertEqual(inner.moves[-1], (100, 100))
-        v.set_level(2)
+        v.set_level(1)
         zm.refresh()  # tras el zoom el cursor vuelve a quedar bajo la mirada
         self.assertEqual(inner.moves[-1], (690.0, 410.0))
         zm.click()
@@ -102,7 +104,7 @@ class TestOverlayInZoomedView(unittest.TestCase):
         full = bar.width()
         view = (400.0 * dpr, 200.0 * dpr, 600.0 * dpr, 500.0 * dpr)
         bar.set_view(view, 2.0)
-        self.assertEqual(bar.buttons["zoom_in"].width(), 90)
+        self.assertEqual(bar.buttons["zoom"].width(), 90)
         self.assertLess(bar.width(), full)
         g = bar.geometry()
         origin = screen.geometry().topLeft()
@@ -110,7 +112,7 @@ class TestOverlayInZoomedView(unittest.TestCase):
         self.assertGreaterEqual(g.left(), origin.x() + 400)
         self.assertGreaterEqual(g.top(), origin.y() + 200)
         bar.set_view(None)
-        self.assertEqual(bar.buttons["zoom_in"].width(), 180)
+        self.assertEqual(bar.buttons["zoom"].width(), 180)
         bar.close()
 
 
@@ -147,8 +149,7 @@ class TestZoomInControlSession(Base):
         messages = []
         s.overlay_message.connect(messages.append)
         bar = self.overlays[0]
-        bar.on_action("zoom_in")
-        bar.on_action("zoom_in")
+        bar.on_action("zoom")  # "Lupa 200%"
         self.assertEqual(s.zoom, 2.0)
         mag = self.mags[0]
         w, h = self.geom["width"], self.geom["height"]
@@ -162,7 +163,11 @@ class TestZoomInControlSession(Base):
         self.assertEqual(s.zoom, 1.0)
         self.assertEqual(mag.calls[-1], (1.0, 0, 0))
         s.set_paused(False)
-        bar.on_action("zoom_in")
+        bar.on_action("zoom")
+        self.assertEqual(s.zoom, 2.0)
+        bar.on_action("zoom")  # pulsarlo otra vez quita el zoom
+        self.assertEqual(s.zoom, 1.0)
+        bar.on_action("zoom")
         s.stop()
         self.assertTrue(mag.closed)  # al detener, la pantalla vuelve siempre a 1x
         self.assertEqual(s.zoom_view.zoom, 1.0)
@@ -170,8 +175,7 @@ class TestZoomInControlSession(Base):
     def test_edge_gaze_pans_and_cursor_goes_to_what_is_seen(self):
         s = self.make_zoom_session()
         s.start()
-        s.change_zoom(+1)
-        s.change_zoom(+1)  # 2x
+        s.toggle_zoom()  # 2x
         view = s.zoom_view
         ox0 = view.ox
         ctrl = s.controller

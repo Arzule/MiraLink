@@ -112,16 +112,24 @@ class TestAdvancedInteractionKeys(unittest.TestCase):
         inter = DEFAULT_CONFIG["interaction"]
         self.assertEqual(inter["pointer_mode"], "absolute")  # el híbrido es opcional
         self.assertEqual(
-            (inter["head_gain_px_per_deg"], inter["hybrid_jump_px"], inter["hybrid_jump_ms"], inter["hybrid_settle_ms"]),
-            (40, 200, 100, 300),
+            (inter["head_deadzone_deg"], inter["head_speed_px_s_per_deg"], inter["hybrid_jump_px"],
+             inter["hybrid_jump_ms"], inter["hybrid_settle_ms"]),
+            (5.0, 15.0, 250, 100, 300),
         )
+        self.assertEqual((inter["mode_blinks"], inter["mode_blink_window_ms"]), (3, 2000))
+        self.assertEqual((inter["sleep_close_ms"], inter["wake_close_ms"]), (2000, 1000))
         ok = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {"pointer_mode": "hybrid"}}))
         self.assertEqual(ok["interaction"]["pointer_mode"], "hybrid")
         bad = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {
-            "pointer_mode": "relativo", "head_gain_px_per_deg": 999, "hybrid_jump_px": 1,
-            "hybrid_jump_ms": -1, "hybrid_settle_ms": "x"}}))
+            "pointer_mode": "relativo", "head_speed_px_s_per_deg": 999, "head_deadzone_deg": float("nan"),
+            "hybrid_jump_px": 1, "hybrid_jump_ms": -1, "hybrid_settle_ms": "x", "sleep_close_ms": 50,
+            "wake_close_ms": 99999, "mode_blinks": 1}}))
         self.assertEqual(bad["interaction"]["pointer_mode"], "absolute")
-        self.assertEqual(bad["interaction"]["head_gain_px_per_deg"], 200)
+        self.assertEqual(bad["interaction"]["head_speed_px_s_per_deg"], 200.0)
+        self.assertEqual(bad["interaction"]["head_deadzone_deg"], 5.0)
+        self.assertEqual(bad["interaction"]["sleep_close_ms"], 1000)
+        self.assertEqual(bad["interaction"]["wake_close_ms"], 5000)
+        self.assertEqual(bad["interaction"]["mode_blinks"], 2)
         self.assertEqual(bad["interaction"]["hybrid_jump_px"], 80)
         self.assertEqual(bad["interaction"]["hybrid_jump_ms"], 0)
         self.assertEqual(bad["interaction"]["hybrid_settle_ms"], 300)

@@ -10,19 +10,27 @@ pantalla -> filtro One Euro con los timestamps (min_cutoff desde smoothing_perce
 de la configuración; ver gaze_filters) -> [modo híbrido] -> radio magnético -> zona muerta (deadzone_px)
 -> mouse.
 
-Modo del puntero (interaction.pointer_mode):
-- "absolute" (por defecto): el cursor es la mirada filtrada.
+Modo del puntero (interaction.pointer_mode = modo con el que arranca; 3 parpadeos cortos, más breves que
+blink_click_ms, en 2 s lo alternan en vivo: mode_blinks / mode_blink_window_ms, evento "mode_<modo>"):
+- "absolute" (por defecto): el cursor es la mirada filtrada. Sin dwell ni hold (la mirada sola es
+  imprecisa y el dwell molestaba): solo clic por parpadeo.
 - "hybrid" (la mirada para lo grueso, la cabeza para lo fino): la mirada pasa por un One Euro propio y
   rápido (HYBRID_GAZE_CUTOFF_HZ, independiente de smoothing_percent: con un suavizado alto la mirada
   tardaba ~1 s en llegar, el cursor se anclaba a medio camino y volvía a saltar en plena fijación; su
   temblor no se ve porque anclado el cursor ya no sigue a la mirada). Cuando esa mirada se aleja más de
   hybrid_jump_px del punto del último salto durante hybrid_jump_ms, el cursor salta y sigue a la mirada
-  hybrid_settle_ms. Después queda anclado: el temblor de la
-  mirada ya no lo mueve y lo mueven los giros de la cabeza (yaw y pitch de MediaPipe, suavizados), a
-  head_gain_px_per_deg px por grado: girar hacia la izquierda lo lleva a la izquierda y subir la barbilla,
-  hacia arriba. El salto se mide contra el punto donde aterrizó la mirada (no contra el cursor), así
-  afinar con la cabeza no provoca un salto de vuelta. Con el cursor congelado (parpadeo, sin cara) la
-  referencia de la cabeza se reinicia: lo que se mueva la cabeza mientras tanto no mueve el cursor.
+  hybrid_settle_ms. Después queda anclado: el temblor de la mirada ya no lo mueve y la cabeza lo mueve
+  como un joystick: la pose (yaw y pitch de MediaPipe, suavizados) al anclarse es el centro; dentro de
+  head_deadzone_deg no se mueve (movimientos involuntarios); fuera, va en la dirección del giro a
+  head_speed_px_s_per_deg px/s por cada grado más allá de la zona muerta (sensibilidad baja: es para
+  afinar). Girar hacia la izquierda lo lleva a la izquierda y subir la barbilla, hacia arriba. Con la
+  cabeza fuera de la zona muerta no hay saltos de la mirada (girarla desplaza la mirada estimada
+  ~30-45 px/°). El salto se mide contra el punto donde aterrizó la mirada, no contra el cursor. Solo en
+  este modo hay dwell -> hold.
+
+Reposo: cerrar los ojos >= sleep_close_ms (2 s, más que cualquier umbral de clic) desactiva el cursor
+(no se mueve, no hace clic ni dwell; la cámara sigue). En reposo, cerrarlos >= wake_close_ms (1 s) lo
+reactiva. Eventos "sleep" y "wake". Para leer o ver un video sin que el cursor interfiera.
 
 El suavizado exponencial anterior se conserva como `filter_kind="exponential"` para comparar en
 scripts/replay_session.py: alpha = 1 - 0.95 * smoothing_percent / 100 (referido a 30 fps); con
@@ -54,6 +62,7 @@ HEAD_MIN_CUTOFF_HZ = 1.0  # One Euro de la cabeza (en grados): ruido de 0.05-0.0
 HEAD_BETA = 0.3  # 1/(°/s): al girar de verdad el corte sube y el cursor responde sin retraso
 HYBRID_GAZE_CUTOFF_HZ = 1.0  # One Euro de la mirada del híbrido (como smoothing_percent ~40 %)
 HYBRID_GAZE_BETA = 0.002
+MAX_HEAD_DT_S = 0.25  # un intervalo mayor no acumula más desplazamiento de joystick
 HOTKEY_LABEL = "Ctrl+Alt+P"
 RECENTER_HOTKEY_LABEL = "Ctrl+Alt+R"
 
@@ -307,6 +316,8 @@ class CursorSnapshot:
     paused: bool = False
     face_found: bool = False
     positioned: bool = False  # ya hay una posición válida de cursor
+    sleeping: bool = False  # en reposo (ojos cerrados >= sleep_close_ms): el cursor no actúa
+    pointer_mode: str = "absolute"
 
 
 class CursorController:
@@ -356,6 +367,9 @@ class CursorController:
         self._head_euro = OneEuroFilter(HEAD_MIN_CUTOFF_HZ, HEAD_BETA, 1.0)
         self._gaze_euro = OneEuroFilter(HYBRID_GAZE_CUTOFF_HZ, HYBRID_GAZE_BETA, 1.0)
         self._reset_hybrid()
+        self._mode_override: Optional[str] = None  # modo elegido con parpadeos (None = el de la config)
+        self._mode_blinks: List[float] = []
+        self.sleeping = False
 
     def _reset_hybrid(self):
         self._cursor: Optional[Tuple[float, float]] = None  # cursor híbrido (antes del imán y la zona muerta)
@@ -363,17 +377,28 @@ class CursorController:
         self._far_since: Optional[float] = None
         self._following = True  # tras un salto (y al empezar) el cursor sigue a la mirada
         self._follow_start: Optional[float] = None
+        self._head_ref: Optional[Tuple[float, float]] = None  # centro del joystick (pose al anclarse)
+        self._joystick_active = False
         self._gaze_euro.reset()
-        self._reset_head()
-
-    def _reset_head(self):
-        self._head_prev = None
         self._head_euro.reset()
 
     @property
     def pointer_mode(self) -> str:
-        mode = self._cfg("pointer_mode")
+        mode = self._mode_override or self._cfg("pointer_mode")
         return mode if mode in POINTER_MODES else "absolute"
+
+    def set_pointer_mode(self, mode: str):
+        """Cambia el modo en vivo (lo usan los parpadeos de cambio de modo)."""
+        if mode not in POINTER_MODES:
+            raise ValueError(f"modo desconocido: {mode}")
+        if mode == self.pointer_mode:
+            return
+        self._mode_override = mode
+        self._reset_hybrid()  # al entrar en el híbrido empieza siguiendo a la mirada
+        if self.state != STATE_HOLD:  # el dwell solo existe en el híbrido; un hold activo se conserva
+            self.state = STATE_IDLE
+            self._anchor = None
+        self._emit("mode_" + mode)
 
     # ------------------------------------------------------------- configuración
     def _cfg(self, key):
@@ -407,6 +432,8 @@ class CursorController:
             state=self.state,
             x=x,
             y=y,
+            sleeping=self.sleeping,
+            pointer_mode=self.pointer_mode,
             dwell_elapsed_ms=elapsed,
             dwell_total_ms=float(self._cfg("dwell_hold_ms")),
             frozen=self._frozen,
@@ -471,6 +498,13 @@ class CursorController:
         ts = float(frame.timestamp)
         if self.paused:
             return self.snapshot(ts)
+        if self.sleeping:  # en reposo solo se escucha el cierre largo que lo reactiva
+            self._last_ts = ts
+            self._frozen = True
+            event = frame.blink_event
+            if event is not None and frame.face_found:
+                self._handle_blink(event, ts)
+            return self.snapshot(ts)
         self._check_hold_timeout(ts)
 
         dt = 0.0 if self._last_ts is None else max(0.0, ts - self._last_ts)
@@ -484,7 +518,7 @@ class CursorController:
         frozen = (not face) or closed or ts < self._freeze_until
         self._frozen = frozen
         if frozen:
-            self._reset_head()  # lo que se mueva la cabeza con el cursor congelado no lo mueve después
+            self._head_euro.reset()  # al volver, la pose filtrada parte del valor real (sin arrastre)
 
         # 1) parpadeo: ocurre en la posición congelada, antes de mover el cursor
         event = frame.blink_event
@@ -535,7 +569,7 @@ class CursorController:
         self.pos = self._filter(gx, gy, dt, ts)
         target = self.pos
         if self.pointer_mode == "hybrid":
-            target = self._hybrid((gx, gy), features, ts)
+            target = self._hybrid((gx, gy), features, dt, ts)
         else:
             self._cursor = None  # al volver al híbrido empieza siguiendo a la mirada
             self._following = True
@@ -545,10 +579,14 @@ class CursorController:
             self.display = shown
             self.mouse.move(shown[0] + self.origin[0], shown[1] + self.origin[1])
 
-    def _hybrid(self, raw_gaze: Tuple[float, float], features, ts: float) -> Tuple[float, float]:
+    def _hybrid(self, raw_gaze: Tuple[float, float], features, dt: float, ts: float) -> Tuple[float, float]:
         """Modo híbrido (ver docstring del módulo): salto con la mirada, ajuste fino con la cabeza."""
-        g = self._gaze_euro(raw_gaze, ts)
-        gaze = (float(g[0]), float(g[1]))
+        if smoothing_to_min_cutoff(float(self._cfg("smoothing_percent"))) is None:
+            self._gaze_euro.reset()  # 0 %: sin filtro también en el híbrido (la estimación cruda)
+            gaze = (float(raw_gaze[0]), float(raw_gaze[1]))
+        else:
+            g = self._gaze_euro(raw_gaze, ts)
+            gaze = (float(g[0]), float(g[1]))
         head = None
         try:
             yaw, pitch = math.degrees(float(features[YAW_INDEX])), math.degrees(float(features[PITCH_INDEX]))
@@ -559,7 +597,7 @@ class CursorController:
             head = None
         if self._cursor is None:
             self._start_follow(gaze, ts)
-        elif not self._following:
+        elif not self._following and not self._joystick_active:  # girando la cabeza no hay saltos
             anchor = self._jump_anchor or gaze
             if math.hypot(gaze[0] - anchor[0], gaze[1] - anchor[1]) > float(self._cfg("hybrid_jump_px")):
                 if self._far_since is None:
@@ -576,15 +614,26 @@ class CursorController:
             elapsed = ts - (self._follow_start if self._follow_start is not None else ts)
             if elapsed * 1000.0 >= float(self._cfg("hybrid_settle_ms")):
                 self._following = False  # anclado: desde aquí lo mueve la cabeza
-        elif head is not None and self._head_prev is not None:
-            gain = float(self._cfg("head_gain_px_per_deg"))
-            # girar hacia la izquierda sube el yaw -> cursor a la izquierda; subir la barbilla baja el pitch
-            x = self._cursor[0] - gain * (head[0] - self._head_prev[0])
-            y = self._cursor[1] + gain * (head[1] - self._head_prev[1])
-            self._cursor = (min(max(x, 0.0), self.width - 1.0), min(max(y, 0.0), self.height - 1.0))
-        if head is not None:
-            self._head_prev = head
+                self._head_ref = head  # centro del joystick
+        elif head is not None:
+            if self._head_ref is None:
+                self._head_ref = head
+            self._joystick(head, dt)
         return self._cursor
+
+    def _joystick(self, head: Tuple[float, float], dt: float):
+        """La cabeza como joystick: zona muerta y velocidad proporcional al giro que la supera."""
+        dyaw, dpitch = head[0] - self._head_ref[0], head[1] - self._head_ref[1]
+        r = math.hypot(dyaw, dpitch)
+        excess = r - float(self._cfg("head_deadzone_deg"))
+        self._joystick_active = excess > 0.0
+        if not self._joystick_active or r <= 0.0:
+            return
+        step = float(self._cfg("head_speed_px_s_per_deg")) * excess * min(dt, MAX_HEAD_DT_S)
+        # girar hacia la izquierda sube el yaw -> cursor a la izquierda; subir la barbilla baja el pitch
+        x = self._cursor[0] - step * dyaw / r
+        y = self._cursor[1] + step * dpitch / r
+        self._cursor = (min(max(x, 0.0), self.width - 1.0), min(max(y, 0.0), self.height - 1.0))
 
     def _start_follow(self, gaze: Tuple[float, float], ts: float):
         self._cursor = gaze
@@ -592,6 +641,8 @@ class CursorController:
         self._following = True
         self._follow_start = ts
         self._far_since = None
+        self._head_ref = None  # el centro del joystick se toma al anclarse
+        self._joystick_active = False
 
     def _snap(self, pos: Tuple[float, float], dt: float) -> Tuple[float, float]:
         """Radio magnético (tras el One Euro, antes de la zona muerta): mientras la mirada filtrada esté a
@@ -611,14 +662,27 @@ class CursorController:
         return self._snapped
 
     def _handle_blink(self, event, ts: float):
+        duration = float(event.duration_ms)
+        if self.sleeping:
+            if duration >= float(self._cfg("wake_close_ms")):
+                self._wake(ts)
+            return
+        if duration >= float(self._cfg("sleep_close_ms")):
+            self._sleep(ts)
+            return
         if ts < self._ignore_until:
             return
-        duration = float(event.duration_ms)
         if self.state == STATE_HOLD:
             if duration >= float(self._cfg("blink_release_ms")):
                 self._release("blink", ts)
+            else:
+                self._count_mode_blink(ts)
             return
-        if float(self._cfg("blink_click_ms")) <= duration <= float(self._cfg("blink_max_ms")):
+        if duration < float(self._cfg("blink_click_ms")):
+            self._count_mode_blink(ts)  # parpadeo normal: solo cuenta para cambiar de modo
+            return
+        self._mode_blinks.clear()
+        if duration <= float(self._cfg("blink_max_ms")):
             if getattr(event, "gaze_suspect", False):
                 # Mirada por debajo de la fila más baja calibrada: el párpado baja solo y el "parpadeo"
                 # puede no ser intencional. No se hace clic (el hold con dwell sigue disponible).
@@ -629,8 +693,39 @@ class CursorController:
             self._anchor = None  # el clic reinicia el dwell
             self._emit("click")
 
+    def _count_mode_blink(self, ts: float):
+        """N parpadeos cortos dentro de la ventana alternan el modo (absoluto <-> híbrido)."""
+        window = float(self._cfg("mode_blink_window_ms")) / 1000.0
+        self._mode_blinks = [t for t in self._mode_blinks if ts - t <= window] + [ts]
+        if len(self._mode_blinks) >= int(self._cfg("mode_blinks")):
+            self._mode_blinks.clear()
+            self.set_pointer_mode("absolute" if self.pointer_mode == "hybrid" else "hybrid")
+
+    def _sleep(self, ts: float):
+        self._release("blink", ts)  # un hold activo se suelta antes del reposo
+        self.sleeping = True
+        self.state = STATE_IDLE
+        self._anchor = None
+        self._mode_blinks.clear()
+        self._frozen = True
+        self._emit("sleep")
+
+    def _wake(self, ts: float):
+        self.sleeping = False
+        self.state = STATE_IDLE
+        self._anchor = None
+        self._prev_closed = False
+        self._freeze_until = ts + float(self._cfg("freeze_after_blink_ms")) / 1000.0
+        self._ignore_until = ts + POST_ACTION_IGNORE_S
+        self._reset_hybrid()  # vuelve con el cursor donde se mira
+        self._emit("wake")
+
     def _update_dwell(self, ts: float, dt: float, frozen: bool):
         if self.state == STATE_HOLD or self.display is None:
+            return
+        if self.pointer_mode != "hybrid":  # el dwell solo existe con el control por cabeza
+            self.state = STATE_IDLE
+            self._anchor = None
             return
         if frozen:
             if self._anchor is not None:

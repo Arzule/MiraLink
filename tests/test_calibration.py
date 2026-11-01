@@ -276,9 +276,9 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(face_guidance(True, (0.5, 0.5), 0.5), (True, "Aléjate"))
         self.assertEqual(face_guidance(True, (0.9, 0.5), 0.24), (True, "Centra tu rostro"))
         self.assertEqual(face_guidance(True, (0.5, 0.5), 0.24), (True, ""))
-        # 0.19 (sesiones reales 2 y 3: jitter doble) ya pide acercarse; el umbral es 0.21
-        self.assertEqual(face_guidance(True, (0.5, 0.5), 0.19), (True, "Acércate"))
-        self.assertEqual(face_guidance(True, (0.5, 0.5), 0.21), (True, ""))
+        # 01/11: el umbral baja de 0.21 a 0.19 (con el modo híbrido no hace falta tanta precisión del iris)
+        self.assertEqual(face_guidance(True, (0.5, 0.5), 0.18), (True, "Acércate"))
+        self.assertEqual(face_guidance(True, (0.5, 0.5), 0.19), (True, ""))
 
 
 if __name__ == "__main__":

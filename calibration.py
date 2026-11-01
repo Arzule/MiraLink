@@ -1511,7 +1511,9 @@ class HoldToExit:
 # Distancia interocular (fracción del ancho del cuadro) aceptable y tolerancia de centrado
 # 0.21: en las sesiones reales, con 0.19 (más lejos) la señal del iris / ruido bajó de ~70 a ~33 y el
 # jitter se duplicó (26 -> 52-61 px) frente a 0.23. Por debajo se pide acercarse.
-IOD_MIN = 0.21
+# 01/11: 0.21 -> 0.19 (pedido del usuario): con el modo híbrido (la cabeza afina) no hace falta tanta
+# precisión del iris y el aviso "Acércate" saltaba demasiado pronto. Se ajustará con las pruebas.
+IOD_MIN = 0.19
 IOD_MAX = 0.32
 CENTER_TOL_X = 0.15
 CENTER_TOL_Y = 0.18

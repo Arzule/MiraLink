@@ -10,6 +10,7 @@ el zoom él mismo (MagSetFullscreenTransform), así que siempre sabe qué zona d
 - Mirar cerca de un borde de la vista ampliada (PAN_MARGIN) durante PAN_DELAY_S la desplaza hacia ese
   lado, más rápido cuanto más cerca del borde (hasta PAN_SPEED_PX_S px de pantalla por segundo).
 - Los cambios de zoom se anclan al centro de la vista (no al botón pulsado, que está en un borde).
+- Un solo nivel (01/11, pedido del usuario): sin zoom o 200 %; el botón "Lupa 200%" lo activa y lo quita.
 
 `ZoomView` es pura (sin Windows ni reloj: recibe dt). `MagnificationApi` es el backend real (ctypes,
 Magnification.dll; no necesita permisos de administrador) y `FakeMagnification` el de tests y --dry-run.
@@ -22,7 +23,7 @@ from typing import List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-ZOOM_LEVELS = (1.0, 1.5, 2.0, 3.0)
+ZOOM_LEVELS = (1.0, 2.0)  # sin zoom o 200 % (única función de la lupa)
 PAN_MARGIN = 0.12  # fracción del ancho/alto de la pantalla junto a cada borde que desplaza la vista
 PAN_SPEED_PX_S = 900.0  # velocidad máxima (px de pantalla por segundo) mirando justo al borde
 PAN_DELAY_S = 0.4  # tiempo mirando la franja del borde antes de desplazar (un vistazo no mueve la vista)
@@ -94,6 +95,10 @@ class ZoomView:
 
     def zoom_out(self) -> bool:
         return self.set_level(self.level - 1)
+
+    def toggle(self) -> bool:
+        """Activa el zoom máximo (200 %) o lo quita. True si cambió."""
+        return self.set_level(0 if self.active else len(self.levels) - 1)
 
     def reset(self) -> bool:
         changed = self.level != 0

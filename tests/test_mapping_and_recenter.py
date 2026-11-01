@@ -334,7 +334,7 @@ class TestAutoOffsetAndPoseDrift(unittest.TestCase):
 
     def test_real_session_numbers_are_documented_in_tolerances(self):
         self.assertEqual(cal.POSE_TOLERANCES[3], 0.03)
-        self.assertEqual(cal.IOD_MIN, 0.21)
+        self.assertEqual(cal.IOD_MIN, 0.19)  # 01/11: antes 0.21 (con el híbrido basta menos precisión)
         self.assertTrue(DEFAULT_FIT["auto_offset"])
 
 

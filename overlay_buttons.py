@@ -20,8 +20,7 @@ from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 # (acción de windows_integration.ACTIONS, texto del botón, nombre accesible)
 OVERLAY_BUTTONS = (
-    ("zoom_in", "Acercar\n(Lupa)", "Acercar con la Lupa"),
-    ("zoom_out", "Alejar\n(Lupa)", "Alejar con la Lupa"),
+    ("zoom", "Lupa\n200%", "Lupa al 200 %: activar o quitar"),
     ("keyboard", "Teclado", "Abrir o cerrar el teclado en pantalla"),
     ("color_filter", "Filtro\nde color", "Activar o desactivar el filtro de color"),
 )

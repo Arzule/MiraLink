@@ -203,6 +203,9 @@ class TestClickGuard(Base):
         self.assertIn("click_blocked", self.events)
 
     def test_suspect_blink_still_releases_hold(self):
+        from test_cursor_control import DWELL_MODE
+
+        self.cfg.update(DWELL_MODE)  # el dwell (y el hold) solo existe en el modo híbrido
         self.cfg["dwell_hold_ms"] = 800
         self.hold_gaze(1.2)
         self.assertEqual(self.mouse.names(), ["down"])

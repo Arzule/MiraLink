@@ -121,7 +121,8 @@ class Base(unittest.TestCase):
         self.feedback = FakeFeedback()
         self.hotkeys = []
         self.mouse_created = 0
-        interaction = cfg if cfg is not None else dict(DEFAULT_CONFIG["interaction"])
+        # el dwell -> hold solo existe en el modo híbrido (la mirada quieta de estos tests no salta)
+        interaction = cfg if cfg is not None else dict(DEFAULT_CONFIG["interaction"], pointer_mode="hybrid")
         self.cfg = interaction
         self.clock = FakeClock()
 
@@ -335,7 +336,7 @@ class TestControlSessionRunning(Base):
         self.assertEqual(len(self.failed_log), 1)
 
     def test_timer_tick_auto_releases_hold_without_frames(self):
-        self.cfg_override = dict(DEFAULT_CONFIG["interaction"], hold_timeout_s=5)
+        self.cfg_override = dict(DEFAULT_CONFIG["interaction"], hold_timeout_s=5, pointer_mode="hybrid")
         self.save_valid_calibration()
         s = self.make_session(cfg=self.cfg_override)
         self.assertTrue(s.start()[0])
@@ -575,6 +576,7 @@ class TestConfigWindowControl(Base):
 
         def factory():
             s = self.make_session()
+            win._config["interaction"]["pointer_mode"] = "hybrid"  # el dwell solo existe en el híbrido
             s.config_getter = lambda: win._config["interaction"]
             holder["s"] = s
             return s

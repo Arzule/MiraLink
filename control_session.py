@@ -47,6 +47,13 @@ from cursor_control import (
 logger = logging.getLogger(__name__)
 
 MSG_NEEDS_CALIBRATION = "Primero calibra el rastreador"
+# mensajes de la etiqueta de estado para los cambios de modo y el reposo (eventos del controlador)
+STATUS_MESSAGES = {
+    "mode_hybrid": "Modo cabeza: la mirada salta y la cabeza afina (3 parpadeos cortos: volver a mirada).",
+    "mode_absolute": "Modo mirada: el cursor sigue la mirada (3 parpadeos cortos: modo cabeza).",
+    "sleep": "Control en reposo: el cursor no se mueve. Cierra los ojos 1 s para volver.",
+    "wake": "Control activo de nuevo.",
+}
 OVERLAY_CHECK_TICKS = 5  # el temporizador va a 100 ms: la ventana activa se revisa cada 0.5 s (menos CPU)
 MSG_RECENTER_NEEDS_CONTROL = f"Inicia el control del cursor para usar Recentrar ({RECENTER_HOTKEY_LABEL})."
 
@@ -321,7 +328,8 @@ class ControlSession(QObject):
         if overlay is None:
             self._overlay_shown = None
             return
-        active = self.running and not self.paused and self.recenter_screen is None
+        sleeping = bool(getattr(self.controller, "sleeping", False))
+        active = self.running and not self.paused and self.recenter_screen is None and not sleeping
         on_desktop = active and self._desktop_in_front()
         state = (on_desktop, active and not on_desktop)
         if state == self._overlay_shown:
@@ -338,7 +346,9 @@ class ControlSession(QObject):
         if self.actions is None or not self.running:
             return
         logger.info("Botón flotante: %s", action)
-        if action in ("zoom_in", "zoom_out"):
+        if action == "zoom":
+            message = self.toggle_zoom()
+        elif action in ("zoom_in", "zoom_out"):
             message = self.change_zoom(+1 if action == "zoom_in" else -1)
         else:
             message = self.actions.run(action)
@@ -350,6 +360,13 @@ class ControlSession(QObject):
     @property
     def zoom(self) -> float:
         return self.zoom_view.zoom if self.zoom_view is not None else 1.0
+
+    def toggle_zoom(self) -> str:
+        """Botón "Lupa 200%": activa el 200 % o vuelve a 1x."""
+        view = self.zoom_view
+        if view is None or not self.running:
+            return "Inicia el control del cursor para usar la lupa."
+        return self.change_zoom(-1 if view.active else +1)
 
     def change_zoom(self, step: int) -> str:
         """Acercar (+1) o alejar (-1) con la lupa de MiraLink. Devuelve el mensaje para la interfaz."""
@@ -553,6 +570,8 @@ class ControlSession(QObject):
     def _check_pose(self, frame):
         """Aviso de deriva: compara la pose de la cabeza con la de la calibración."""
         monitor = self.pose_monitor
+        if getattr(self.controller, "sleeping", False):
+            return  # en reposo no se avisa (la persona puede estar leyendo o viendo un video)
         if getattr(self.controller, "pointer_mode", "absolute") == "hybrid":
             # en el modo híbrido girar la cabeza es como se afina el cursor: no es una deriva
             if self._pose_warning_shown:
@@ -582,6 +601,10 @@ class ControlSession(QObject):
     def _on_controller_event(self, name: str, x: float, y: float):
         if self.feedback is not None:
             self.feedback.notify(name)
+        if name in STATUS_MESSAGES:
+            logger.info("Control: %s", name)
+            self._sync_overlay()  # en reposo no hay botones flotantes
+            self.overlay_message.emit(STATUS_MESSAGES[name])
         self.event_occurred.emit(name)
 
     def _on_timer(self):
