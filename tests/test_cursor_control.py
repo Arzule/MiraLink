@@ -596,6 +596,23 @@ class TestHybridPointer(Base):
         snap = self.look(1.0, 800, 500)
         self.assertEqual(self.mouse.names(), ["down"])  # anclado y quieto: dwell normal
 
+    def test_joystick_center_is_the_pose_when_entering_head_mode(self):
+        self.look(1.0, 800, 500, yaw_deg=0.0)  # entra al modo cabeza con la cabeza en 0°
+        self.look(0.5, 800, 500, yaw_deg=3.0)  # 3°: dentro de la zona muerta
+        snap = self.look(1.0, 1500, 700, yaw_deg=3.0)  # salto de la mirada con la cabeza en 3°
+        self.assertIn("gaze_jump", self.events)
+        landed = snap.x
+        # tras el salto el centro sigue en 0° (no en 3°): girar a 7° son 2° más allá -> se mueve
+        snap = self.look(1.0, 1500, 700, yaw_deg=7.0)
+        self.assertAlmostEqual(snap.x, landed - 45.0, delta=6.0)
+        # al cambiar de modo y volver, el centro pasa a ser la pose de ese momento (7°)
+        self.ctl.set_pointer_mode("absolute")
+        self.ctl.set_pointer_mode("hybrid")
+        self.look(1.0, 900, 300, yaw_deg=7.0)
+        before = self.ctl.screen_pos()
+        snap = self.look(1.0, 900, 300, yaw_deg=10.0)  # 3° desde el nuevo centro: no se mueve
+        self.assertEqual((snap.x, snap.y), before)
+
     def test_no_gaze_jump_while_head_is_steering(self):
         self.look(1.0, 800, 500)
         self.look(0.5, 800, 500, yaw_deg=8.0)

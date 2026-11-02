@@ -20,7 +20,9 @@ blink_click_ms, en 2 s lo alternan en vivo: mode_blinks / mode_blink_window_ms, 
   temblor no se ve porque anclado el cursor ya no sigue a la mirada). Cuando esa mirada se aleja más de
   hybrid_jump_px del punto del último salto durante hybrid_jump_ms, el cursor salta y sigue a la mirada
   hybrid_settle_ms. Después queda anclado: el temblor de la mirada ya no lo mueve y la cabeza lo mueve
-  como un joystick: la pose (yaw y pitch de MediaPipe, suavizados) al anclarse es el centro; dentro de
+  como un joystick: el centro es la pose (yaw y pitch de MediaPipe, suavizados) al entrar en el modo
+  cabeza (al iniciar el control en ese modo, al cambiar a él con parpadeos, al reanudar la pausa o al
+  salir del reposo) y se mantiene en los saltos de la mirada; dentro de
   head_deadzone_deg no se mueve (movimientos involuntarios); fuera, va en la dirección del giro a
   head_speed_px_s_per_deg px/s por cada grado más allá de la zona muerta (sensibilidad baja: es para
   afinar). Girar hacia la izquierda lo lleva a la izquierda y subir la barbilla, hacia arriba. Con la
@@ -379,7 +381,7 @@ class CursorController:
         self._far_since: Optional[float] = None
         self._following = True  # tras un salto (y al empezar) el cursor sigue a la mirada
         self._follow_start: Optional[float] = None
-        self._head_ref: Optional[Tuple[float, float]] = None  # centro del joystick (pose al anclarse)
+        self._head_ref: Optional[Tuple[float, float]] = None  # centro del joystick (pose al entrar al modo)
         self._joystick_active = False
         self._gaze_euro.reset()
         self._head_euro.reset()
@@ -575,6 +577,7 @@ class CursorController:
         else:
             self._cursor = None  # al volver al híbrido empieza siguiendo a la mirada
             self._following = True
+            self._head_ref = None  # ... y toma como centro la pose de ese momento
         shown = apply_deadzone(self.display, self._snap(target, dt), float(self._cfg("deadzone_px")))
         moved = self.display is None or abs(shown[0] - self.display[0]) >= 0.5 or abs(shown[1] - self.display[1]) >= 0.5
         if moved:
@@ -597,6 +600,8 @@ class CursorController:
                 head = (float(h[0]), float(h[1]))
         except (IndexError, TypeError, ValueError):
             head = None
+        if head is not None and self._head_ref is None:
+            self._head_ref = head  # primera pose en el modo cabeza: centro fijo del joystick
         if self._cursor is None:
             self._start_follow(gaze, ts)
         elif not self._following and not self._joystick_active:  # girando la cabeza no hay saltos
@@ -616,10 +621,7 @@ class CursorController:
             elapsed = ts - (self._follow_start if self._follow_start is not None else ts)
             if elapsed * 1000.0 >= float(self._cfg("hybrid_settle_ms")):
                 self._following = False  # anclado: desde aquí lo mueve la cabeza
-                self._head_ref = head  # centro del joystick
-        elif head is not None:
-            if self._head_ref is None:
-                self._head_ref = head
+        elif head is not None and self._head_ref is not None:
             self._joystick(head, dt)
         return self._cursor
 
@@ -643,7 +645,6 @@ class CursorController:
         self._following = True
         self._follow_start = ts
         self._far_since = None
-        self._head_ref = None  # el centro del joystick se toma al anclarse
         self._joystick_active = False
 
     def _snap(self, pos: Tuple[float, float], dt: float) -> Tuple[float, float]:

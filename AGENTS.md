@@ -337,6 +337,7 @@ Problema reportado con cámara real: desvío considerable aunque el error estima
 ### Ajustes tras la prueba del modo cabeza (01/11)
 - El usuario probó los modos mirada y cabeza: bien, pero el dwell se activaba con movimientos cortos y el joystick iba muy lento.
 - Dwell del modo cabeza solo con el cursor completamente quieto: nueva clave `dwell_still_px` = 6 (1-50) en lugar de `dwell_radius_px` (50, que ya no se usa: el dwell solo existe en el modo cabeza); además el dwell se reinicia mientras la cabeza está fuera de la zona muerta (joystick activo) y mientras el cursor sigue a la mirada tras un salto. Clave nueva para que el `dwell_radius_px: 50` guardado en los config.json no la pise.
+- Centro del joystick (pedido del usuario): la pose de la cabeza al ENTRAR en el modo cabeza (primer cuadro tras `_reset_hybrid`: iniciar el control en ese modo, cambiar a él con parpadeos, reanudar la pausa, salir del reposo, o pointer_mode cambiado en vivo en la config) y se mantiene en los saltos de la mirada. Antes se volvía a tomar en cada salto.
 - `head_speed_px_s_per_deg` 15 -> 22.5 (+50 %). El config.json local del usuario guardaba 15 explícitamente: se cambió ese valor a 22.5 (sin commitear el archivo). Pendiente: fijar el valor por defecto con más pruebas y luego un slider.
 - Verificado con tests (contenido, valores de la config, accesibilidad, 48 px, índice que desplaza el texto, mensajes de Qt salvo artefactos de offscreen) y con renders de la plataforma real en los temas oscuro y alto contraste 1. No verificado con una persona.
 

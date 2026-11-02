@@ -101,7 +101,8 @@ segundo.</li>
 <ul>
 <li><b>Modo mirada:</b> el cursor va a donde miras. Clic con parpadeo.</li>
 <li><b>Modo cabeza:</b> el cursor salta a donde miras y se queda quieto. Para afinar, gira un poco la
-cabeza (más de {dz}°): el cursor se desliza hacia ese lado. Vuelve la cabeza al centro para detenerlo.</li>
+cabeza (más de {dz}°): el cursor se desliza hacia ese lado. El centro es la posición de tu cabeza al entrar
+en este modo: vuelve a ella para detenerlo.</li>
 <li><b>Cambiar de modo:</b> {mode_n} parpadeos normales en menos de {mode_win}.</li>
 </ul>
 """),
