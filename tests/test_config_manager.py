@@ -114,8 +114,9 @@ class TestAdvancedInteractionKeys(unittest.TestCase):
         self.assertEqual(
             (inter["head_deadzone_deg"], inter["head_speed_px_s_per_deg"], inter["hybrid_jump_px"],
              inter["hybrid_jump_ms"], inter["hybrid_settle_ms"]),
-            (5.0, 15.0, 250, 100, 300),
+            (5.0, 22.5, 250, 100, 300),
         )
+        self.assertEqual(inter["dwell_still_px"], 6)
         self.assertEqual((inter["mode_blinks"], inter["mode_blink_window_ms"]), (3, 2000))
         self.assertEqual((inter["sleep_close_ms"], inter["wake_close_ms"]), (2000, 1000))
         ok = _validate_config(_deep_merge(DEFAULT_CONFIG, {"interaction": {"pointer_mode": "hybrid"}}))

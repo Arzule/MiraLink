@@ -92,7 +92,8 @@ class TestHelpDialog(unittest.TestCase):
         self.assertFalse(win.help_dialog.isVisible())
         win.close()
         # artefactos conocidos de la plataforma offscreen (no ocurren con la real)
-        artifacts = ("setPointSize", "does not support raise", "does not support activateWindow")
+        artifacts = ("setPointSize", "does not support raise", "does not support activateWindow",
+                     "Cannot find font directory")
         self.assertEqual([m for m in self.messages if not any(a in m for a in artifacts)], [])
 
 

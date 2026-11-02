@@ -42,7 +42,10 @@ DEFAULT_CONFIG = {
         # híbrido, como un joystick: giro de la cabeza respecto a la pose del último salto; dentro de la zona
         # muerta no se mueve; fuera, velocidad = head_speed_px_s_per_deg por grado más allá de la zona
         "head_deadzone_deg": 5.0,
-        "head_speed_px_s_per_deg": 15.0,
+        "head_speed_px_s_per_deg": 22.5,  # 01/11: 15 -> 22.5 (+50 %, se movía muy lento)
+        # dwell del modo cabeza: solo cuenta con el cursor completamente quieto (se mueve más que esto o
+        # la cabeza fuera de la zona muerta -> el dwell vuelve a empezar)
+        "dwell_still_px": 6,
         "hybrid_jump_px": 250,  # híbrido: la mirada salta si se aleja más que esto del punto del último salto
         "hybrid_jump_ms": 100,  # híbrido: durante cuánto tiempo seguido (filtra picos)
         "hybrid_settle_ms": 300,  # híbrido: tras un salto el cursor sigue a la mirada este tiempo mínimo
@@ -178,6 +181,7 @@ def _validate_config(config):
         ("mode_blinks", 2, 6),
         ("mode_blink_window_ms", 800, 5000),
         ("hybrid_jump_px", 80, 600),
+        ("dwell_still_px", 1, 50),
         ("hybrid_jump_ms", 0, 500),
         ("hybrid_settle_ms", 0, 1000),
         ("sleep_close_ms", 1000, 10000),

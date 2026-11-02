@@ -332,6 +332,12 @@ Problema reportado con cámara real: desvío considerable aunque el error estima
 - Botón "Ayuda" (secundario, 48 px) en la cabecera de la ventana de configuración, junto a la insignia del rastreador. Abre `help_ui.HelpDialog`: no modal (se puede leer mientras se usa la app), una sola a la vez (`ConfigWindow.help_dialog`, referencia fuerte; reabrir la reemplaza). Índice de secciones a la izquierda (ítems de 48 px, la seleccionada con borde del color del texto del tema) y la guía en un QTextBrowser con anclas; hereda el tema de la ventana.
 - Secciones (`help_sections`): qué es, antes de empezar, calibrar, iniciar/pausar/recentrar, modo mirada y modo cabeza, clic/hold/arrastrar, reposo, botones flotantes y lupa, ajustes de la ventana, ajustes avanzados de config.json, atajos y gestos, problemas frecuentes. Los números (umbrales de parpadeo, dwell, reposo, parpadeos de cambio de modo, zona muerta, modo inicial, atajos) salen de la configuración actual al abrirla: si cambia el comportamiento, actualizar también este texto.
 - Es aparte de los avisos durante el uso (vista previa de la calibración, etiqueta de estado, indicador del cursor).
+- 01/11 (tras probarla el usuario): texto resumido, con descripciones directas y simples (listas cortas, una idea por línea); mismas secciones.
+
+### Ajustes tras la prueba del modo cabeza (01/11)
+- El usuario probó los modos mirada y cabeza: bien, pero el dwell se activaba con movimientos cortos y el joystick iba muy lento.
+- Dwell del modo cabeza solo con el cursor completamente quieto: nueva clave `dwell_still_px` = 6 (1-50) en lugar de `dwell_radius_px` (50, que ya no se usa: el dwell solo existe en el modo cabeza); además el dwell se reinicia mientras la cabeza está fuera de la zona muerta (joystick activo) y mientras el cursor sigue a la mirada tras un salto. Clave nueva para que el `dwell_radius_px: 50` guardado en los config.json no la pise.
+- `head_speed_px_s_per_deg` 15 -> 22.5 (+50 %). El config.json local del usuario guardaba 15 explícitamente: se cambió ese valor a 22.5 (sin commitear el archivo). Pendiente: fijar el valor por defecto con más pruebas y luego un slider.
 - Verificado con tests (contenido, valores de la config, accesibilidad, 48 px, índice que desplaza el texto, mensajes de Qt salvo artefactos de offscreen) y con renders de la plataforma real en los temas oscuro y alto contraste 1. No verificado con una persona.
 
 - No empezar las etapas 5-7 sin que el usuario lo pida. El .exe ya existe (pedido por el usuario, ver "Ejecutable").

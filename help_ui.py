@@ -62,174 +62,115 @@ def help_sections(config: Optional[dict] = None) -> List[Tuple[str, str, str]]:
 
     return [
         ("inicio", "Qué es MiraLink", f"""
-<p>MiraLink mueve el cursor del sistema con la <b>mirada</b> y hace clic con un <b>parpadeo</b>, usando solo
-la webcam. Está pensado para personas que no pueden usar bien el mouse.</p>
-<p>El uso normal tiene tres pasos:</p>
+<p>MiraLink mueve el cursor con la <b>mirada</b> y hace clic con un <b>parpadeo</b>, usando solo la webcam.</p>
 <ol>
-<li><b>Calibrar</b> (una vez por sesión o cuando cambies de sitio): miras unos puntos en la pantalla.</li>
-<li><b>Iniciar el control del cursor</b>.</li>
-<li>Usar el ordenador con la mirada, los parpadeos y, si quieres, pequeños giros de la cabeza.</li>
+<li><b>Calibra</b>: mira unos puntos en la pantalla.</li>
+<li><b>Inicia el control del cursor</b>.</li>
+<li>Usa el ordenador con la mirada, los parpadeos y la cabeza.</li>
 </ol>
-<p><b>Seguridad:</b> <b>{pause}</b> pausa o reanuda el control en cualquier momento, desde cualquier
-programa.</p>
+<p><b>{pause}</b> pausa o reanuda el control en cualquier momento.</p>
 """),
         ("preparar", "Antes de empezar", """
 <ul>
-<li><b>Cámara:</b> cierra la app Cámara de Windows y otros programas que la usen (solo uno puede usarla a la vez).</li>
-<li><b>Luz:</b> que la cara esté bien iluminada de frente; evita una ventana o una lámpara detrás de ti.
-Con poca luz la cámara entrega menos imágenes por segundo y el cursor tiembla más.</li>
-<li><b>Distancia:</b> siéntate a una distancia cómoda con la cara centrada. Al calibrar, la vista previa
-dice <i>Acércate</i>, <i>Aléjate</i> o <i>Centra tu rostro</i> si hace falta.</li>
-<li><b>Postura:</b> busca una postura que puedas mantener. Mover la cabeza mucho después de calibrar desvía el
-cursor (se corrige con <i>Recentrar</i>).</li>
-<li><b>Gafas:</b> funcionan, pero los reflejos fuertes en los cristales pueden empeorar la precisión.</li>
+<li>Cierra otras apps que usen la cámara (por ejemplo, la app Cámara).</li>
+<li>Ilumina tu cara de frente; evita tener una ventana o lámpara detrás.</li>
+<li>Siéntate cómodo, con la cara centrada frente a la cámara.</li>
+<li>Mantén la misma postura después de calibrar.</li>
 </ul>
 """),
         ("calibrar", "Calibrar", """
-<p>Pulsa <b>Calibrar Rastreador Ocular</b>. Se abre una ventana con la vista previa de la cámara: colócate
-hasta que no haya avisos y pulsa <b>Iniciar Calibración</b>.</p>
 <ol>
-<li><b>Calibración (9 puntos):</b> aparecen puntos en el centro, los bordes y las esquinas. Pulsa
-<b>Enter</b> cuando estés listo y mira cada punto <b>sin mover la cabeza</b> hasta que su círculo se cierre.</li>
-<li><b>Comprobación (5 puntos):</b> pulsa <b>Enter</b> otra vez y mira cada punto nuevo. Sirve para medir
-el error real.</li>
+<li>Pulsa <b>Calibrar Rastreador Ocular</b>. Colócate hasta que la vista previa no muestre avisos y pulsa
+<b>Iniciar Calibración</b>.</li>
+<li>Pulsa <b>Enter</b> y mira cada punto, sin mover la cabeza, hasta que su círculo se cierre.</li>
+<li>Pulsa <b>Enter</b> otra vez y mira los puntos de comprobación.</li>
+<li>Pulsa <b>Aceptar</b>, o <b>Repetir</b> si el error sale alto.</li>
 </ol>
-<p>Al terminar verás el <b>error estimado</b> en píxeles y qué ojo se eligió para seguir la mirada (el
-programa elige solo el que tiembla menos). Pulsa <b>Aceptar</b> para guardarla o <b>Repetir</b> si el
-error es grande (aviso en ámbar).</p>
-<p>Para salir a mitad, <b>mantén ESC</b> pulsado un momento.</p>
-<p><b>Vuelve a calibrar</b> si cambias de pantalla, de silla o de lugar, si cambia mucho la luz o si
-<i>Recentrar</i> ya no basta.</p>
+<p>Para salir, mantén <b>ESC</b>. Vuelve a calibrar si cambias de lugar, de pantalla o de luz.</p>
 """),
         ("control", "Iniciar, pausar y recentrar", f"""
 <ul>
-<li><b>Iniciar Control del Cursor:</b> el cursor empieza a seguir tu mirada (hace falta haber calibrado).
-El mismo botón lo pausa.</li>
-<li><b>{pause}</b> (atajo global de seguridad): pausa o reanuda desde cualquier programa. Al pausar se
-suelta cualquier clic mantenido y se quita el zoom de la lupa.</li>
-<li><b>Recentrar</b> (botón o <b>{recenter}</b>): si el cursor queda siempre desplazado hacia un lado, mira
-el punto que aparece en el centro durante un segundo y el desplazamiento se corrige.</li>
-<li>Si ves <b>Recentra: {recenter}</b> junto al cursor, tu cabeza se movió respecto a la calibración:
-recentra mirando el punto central.</li>
+<li><b>Iniciar Control del Cursor</b>: el cursor sigue tu mirada. El mismo botón lo pausa.</li>
+<li><b>{pause}</b>: pausa o reanuda desde cualquier programa.</li>
+<li><b>Recentrar</b> o <b>{recenter}</b>: si el cursor queda siempre corrido, mira el punto central un
+segundo.</li>
 </ul>
-<p>La etiqueta de estado (bajo los botones) muestra la cámara, los fps y los mensajes del control.</p>
 """),
         ("modos", "Modo mirada y modo cabeza", f"""
-<p>Hay dos formas de mover el cursor. El control empieza en <b>modo {start_mode}</b>.</p>
-<h3>Modo mirada</h3>
-<p>El cursor va a donde miras. Es el más directo, pero la mirada tiembla y tiene un pequeño error, así que
-apuntar a cosas pequeñas cuesta. En este modo no hay clic mantenido (dwell).</p>
-<h3>Modo cabeza (mirada + cabeza)</h3>
+<p>El control empieza en <b>modo {start_mode}</b>.</p>
 <ul>
-<li><b>La mirada hace lo grueso:</b> cuando miras a otro sitio de la pantalla, el cursor salta allí.</li>
-<li><b>Después el cursor se queda quieto:</b> el temblor de la mirada ya no lo mueve.</li>
-<li><b>La cabeza afina, como un joystick:</b> gira la cabeza un poco más de {dz}° hacia un lado y el cursor
-se desliza despacio en esa dirección; cuanto más la giras, más rápido. Girar hacia tu izquierda lo lleva a
-la izquierda; subir la barbilla, hacia arriba. Movimientos pequeños (menos de {dz}°) no lo mueven.</li>
-<li>Vuelve la cabeza a su posición normal para que el cursor se detenga.</li>
+<li><b>Modo mirada:</b> el cursor va a donde miras. Clic con parpadeo.</li>
+<li><b>Modo cabeza:</b> el cursor salta a donde miras y se queda quieto. Para afinar, gira un poco la
+cabeza (más de {dz}°): el cursor se desliza hacia ese lado. Vuelve la cabeza al centro para detenerlo.</li>
+<li><b>Cambiar de modo:</b> {mode_n} parpadeos normales en menos de {mode_win}.</li>
 </ul>
-<h3>Cambiar de modo</h3>
-<p>Haz <b>{mode_n} parpadeos normales</b> (rápidos, más cortos que un clic) en menos de {mode_win}. Junto al
-cursor aparece <i>Modo cabeza</i> o <i>Modo mirada</i>.</p>
 """),
-        ("clic", "Clic, clic mantenido y arrastrar", f"""
+        ("clic", "Clic y arrastrar", f"""
 <ul>
-<li><b>Clic:</b> cierra los ojos a propósito al menos <b>{click} ms</b> (un parpadeo un poco más largo de lo
-normal) y ábrelos. El clic se hace donde estaba el cursor al cerrar los ojos. Los parpadeos naturales, más
-cortos, se ignoran. Cierres de más de {_fmt_s(blink_max)} tampoco hacen clic.</li>
-<li><b>Clic mantenido (solo en modo cabeza):</b> deja el cursor quieto <b>{_fmt_s(dwell)}</b>; un arco alrededor del
-cursor muestra el avance y al completarse se mantiene pulsado el botón (anillo relleno). Mueve el cursor
-para arrastrar.</li>
-<li><b>Soltar:</b> con el botón mantenido, cierra los ojos al menos <b>{release} ms</b>. Por seguridad se
-suelta solo a los {hold_timeout} s.</li>
-<li>Si aparece <i>Clic bloqueado</i>, el parpadeo empezó mirando por debajo de la zona calibrada (al mirar
-abajo el párpado baja solo): mira un poco más arriba.</li>
+<li><b>Clic:</b> cierra los ojos al menos <b>{click} ms</b> (un parpadeo algo largo). Los parpadeos normales se
+ignoran.</li>
+<li><b>Mantener (modo cabeza):</b> deja el cursor totalmente quieto <b>{_fmt_s(dwell)}</b>. Luego mueve el
+cursor para arrastrar.</li>
+<li><b>Soltar:</b> cierra los ojos al menos <b>{release} ms</b>. Se suelta solo a los {hold_timeout} s.</li>
 </ul>
-<p>Los umbrales se ajustan en las tarjetas de la ventana principal (ver <i>Ajustes</i>).</p>
 """),
-        ("reposo", "Reposo (leer o ver un video)", f"""
-<p>Para leer o ver un video sin que el cursor estorbe:</p>
+        ("reposo", "Reposo", f"""
 <ul>
-<li><b>Cierra los ojos {sleep} o más:</b> el control queda <b>en reposo</b>. El cursor no se mueve ni hace
-clic, y los botones flotantes se ocultan. La cámara y el programa siguen funcionando y el zoom de la lupa
-se mantiene.</li>
-<li><b>Cierra los ojos {wake} o más</b> estando en reposo: el control vuelve, con el cursor donde miras.</li>
+<li><b>Ojos cerrados {sleep}:</b> el cursor se queda quieto, para leer o ver un video.</li>
+<li><b>Ojos cerrados {wake}:</b> el control vuelve.</li>
 </ul>
-<p>Mirar hacia abajo (por ejemplo al teclado) puede parecer ojos cerrados: si el control entra en reposo
-sin querer, cierra los ojos {wake} para volver.</p>
+<p>Mirar mucho rato hacia abajo (al teclado) también puede activar el reposo.</p>
 """),
-        ("botones", "Botones flotantes y lupa", """
-<p>Con el control en marcha y el <b>escritorio</b> delante aparece una barra de botones grandes en el borde
-derecho. Al acercar el cursor, un imán lo lleva al centro del botón; púlsalo con un clic (parpadeo).</p>
+        ("botones", "Botones flotantes", """
+<p>En el escritorio aparecen botones grandes a la derecha:</p>
 <ul>
-<li><b>Lupa 200%:</b> amplía toda la pantalla al doble; púlsalo otra vez para quitarlo. Con zoom, el cursor
-va a lo que ves ampliado, y mirar cerca de un borde un momento desplaza la vista hacia ese lado.</li>
-<li><b>Teclado:</b> abre o cierra el teclado en pantalla de Windows para escribir con clics.</li>
-<li><b>Filtro de color:</b> activa o desactiva el filtro de color de Windows. Si el atajo está
-desactivado, se abre la configuración para activarlo.</li>
+<li><b>Lupa 200%:</b> amplía la pantalla. Mira un borde para moverte. Púlsalo otra vez para quitarla.</li>
+<li><b>Teclado:</b> abre o cierra el teclado en pantalla.</li>
+<li><b>Filtro de color:</b> activa o quita el filtro de color de Windows.</li>
 </ul>
-<p>Con una <b>aplicación</b> delante la barra se oculta (no tapa su barra de desplazamiento) y queda un solo
-botón, <b>Ir al escritorio</b>, que minimiza las ventanas y vuelve a mostrar la barra.</p>
-<p>En pausa, en reposo y al recentrar no hay botones.</p>
+<p>Sobre otras apps solo queda <b>Ir al escritorio</b>.</p>
 """),
-        ("ajustes", "Ajustes de la ventana", """
+        ("ajustes", "Ajustes", """
 <ul>
-<li><b>Suavizado del cursor:</b> más alto = cursor más estable pero con más retraso.</li>
-<li><b>Tiempo de fijación para mantener:</b> cuánto tiempo quieto hasta el clic mantenido (modo cabeza).</li>
-<li><b>Duración mínima de parpadeo para clic:</b> súbela si hay clics sin querer; bájala si cuesta hacer clic.</li>
-<li><b>Duración mínima de parpadeo para soltar:</b> cuánto cerrar los ojos para soltar un clic mantenido.</li>
-<li><b>Tema</b> y <b>tamaño de letra</b> (abajo a la derecha): temas oscuros y de alto contraste.</li>
+<li><b>Suavizado:</b> más alto, cursor más estable pero más lento.</li>
+<li><b>Tiempo de fijación:</b> tiempo quieto para mantener el clic.</li>
+<li><b>Parpadeo para clic:</b> súbelo si hay clics sin querer.</li>
+<li><b>Parpadeo para soltar:</b> tiempo para soltar un clic mantenido.</li>
+<li><b>Tema</b> y <b>tamaño de letra</b>.</li>
 </ul>
-<p>Los cambios se aplican al momento, incluso con el control en marcha. Pulsa <b>Guardar Configuración</b>
-para conservarlos la próxima vez.</p>
+<p>Los cambios se aplican al momento. Pulsa <b>Guardar Configuración</b> para conservarlos.</p>
 """),
-        ("avanzado", "Ajustes avanzados (config.json)", """
-<p>Algunos ajustes no tienen control en la ventana. Están en el archivo <b>config.json</b>, junto al
-programa (edítalo con el programa cerrado o reinicia el control). Valores útiles en <b>"interaction"</b>:</p>
+        ("avanzado", "Ajustes avanzados", """
+<p>En <b>config.json</b>, junto al programa, dentro de <b>"interaction"</b>:</p>
 <ul>
-<li><b>pointer_mode</b>: modo con el que arranca el control, "absolute" (mirada) o "hybrid" (cabeza).</li>
-<li><b>head_deadzone_deg</b>: grados de giro de la cabeza que no mueven el cursor (zona muerta).</li>
-<li><b>head_speed_px_s_per_deg</b>: velocidad del joystick de la cabeza (más alto = más rápido).</li>
-<li><b>hybrid_jump_px</b>: cuánto tiene que alejarse la mirada para que el cursor salte.</li>
-<li><b>mode_blinks</b> y <b>mode_blink_window_ms</b>: parpadeos para cambiar de modo y en cuánto tiempo.</li>
-<li><b>sleep_close_ms</b> y <b>wake_close_ms</b>: ojos cerrados para el reposo y para volver.</li>
-<li><b>snap_radius_px</b>: alcance del imán de los botones (0 = sin imán).</li>
+<li><b>pointer_mode:</b> modo al iniciar ("absolute" mirada, "hybrid" cabeza).</li>
+<li><b>head_speed_px_s_per_deg:</b> velocidad del cursor con la cabeza.</li>
+<li><b>head_deadzone_deg:</b> giro de cabeza que se ignora.</li>
+<li><b>sleep_close_ms</b> y <b>wake_close_ms:</b> tiempos del reposo.</li>
 </ul>
-<p>Otros: <b>"overlay"</b> (<b>enabled</b>, <b>position</b> "right"/"left", <b>button_size</b>),
-<b>"camera"</b> (<b>exposure</b> "fast" si la cámara da pocos fps) y <b>"tracking"</b> (<b>eye</b>: "auto",
-"both", "right" o "left"; <b>gaze_model</b>: "mobileone_s0" usa además una red neuronal; tras cambiarlo
-hay que volver a calibrar).</p>
 """),
         ("atajos", "Atajos y gestos", f"""
 <table cellpadding="6">
-<tr><td><b>{pause}</b></td><td>Pausar o reanudar el control (seguridad)</td></tr>
-<tr><td><b>{recenter}</b></td><td>Recentrar la mirada</td></tr>
-<tr><td><b>Parpadeo de {click} ms o más</b></td><td>Clic</td></tr>
-<tr><td><b>Cursor quieto {_fmt_s(dwell)}</b></td><td>Clic mantenido (modo cabeza)</td></tr>
-<tr><td><b>Parpadeo de {release} ms o más</b></td><td>Soltar el clic mantenido</td></tr>
-<tr><td><b>{mode_n} parpadeos normales en {mode_win}</b></td><td>Cambiar entre modo mirada y modo cabeza</td></tr>
+<tr><td><b>{pause}</b></td><td>Pausar o reanudar</td></tr>
+<tr><td><b>{recenter}</b></td><td>Recentrar</td></tr>
+<tr><td><b>Parpadeo de {click} ms</b></td><td>Clic</td></tr>
+<tr><td><b>Cursor quieto {_fmt_s(dwell)}</b></td><td>Mantener (modo cabeza)</td></tr>
+<tr><td><b>Parpadeo de {release} ms</b></td><td>Soltar</td></tr>
+<tr><td><b>{mode_n} parpadeos normales en {mode_win}</b></td><td>Cambiar de modo</td></tr>
 <tr><td><b>Ojos cerrados {sleep}</b></td><td>Reposo</td></tr>
-<tr><td><b>Ojos cerrados {wake} (en reposo)</b></td><td>Volver del reposo</td></tr>
-<tr><td><b>Enter</b></td><td>Empezar cada pantalla de la calibración</td></tr>
-<tr><td><b>Mantener ESC</b></td><td>Salir de la calibración</td></tr>
+<tr><td><b>Ojos cerrados {wake}</b></td><td>Salir del reposo</td></tr>
+<tr><td><b>Enter / mantener ESC</b></td><td>Empezar / salir de la calibración</td></tr>
 </table>
 """),
         ("problemas", "Problemas frecuentes", f"""
 <ul>
-<li><b>El cursor queda desplazado:</b> usa Recentrar ({recenter}). Si sigue, calibra de nuevo.</li>
-<li><b>El cursor tiembla:</b> acércate un poco, mejora la luz, sube el suavizado o usa el modo cabeza.</li>
-<li><b>Hay clics sin querer:</b> sube la duración mínima de parpadeo para clic.</li>
-<li><b>Cuesta hacer clic:</b> bájala, o cierra los ojos un poco más largo.</li>
-<li><b>El cursor no se mueve:</b> mira si está en pausa ({pause}) o en reposo (cierra los ojos {wake}).</li>
-<li><b>La cámara no abre:</b> cierra la app Cámara u otros programas que la usen.</li>
-<li><b>Pocos fps (aviso en la etiqueta de estado):</b> mejora la iluminación o pon "exposure": "fast" en
-config.json.</li>
-<li><b>El modo cambió solo:</b> pasa si parpadeas {mode_n} veces seguidas rápido; repite los {mode_n}
-parpadeos para volver.</li>
-<li><b>Los botones flotantes no aparecen:</b> solo se ven con el escritorio delante; usa <i>Ir al
-escritorio</i>.</li>
+<li><b>Cursor corrido:</b> Recentrar ({recenter}). Si sigue, calibra otra vez.</li>
+<li><b>Cursor tembloroso:</b> acércate, mejora la luz o usa el modo cabeza.</li>
+<li><b>Clics sin querer:</b> sube el parpadeo para clic.</li>
+<li><b>El cursor no se mueve:</b> puede estar en pausa ({pause}) o en reposo (ojos cerrados {wake}).</li>
+<li><b>La cámara no abre:</b> cierra otras apps que la usen.</li>
+<li><b>No veo los botones:</b> solo salen en el escritorio; usa Ir al escritorio.</li>
 </ul>
-<p>Si algo falla, el registro <b>logs\\miralink_debug.log</b> (junto al programa) ayuda a encontrar la causa.</p>
 """),
     ]
 

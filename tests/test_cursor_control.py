@@ -69,7 +69,9 @@ def blink(end_ts, duration_ms):
 
 # El dwell (y el hold) solo existe en el modo híbrido. Con estos valores el híbrido salta a cada
 # movimiento y, con smoothing 0, sigue la mirada exacta: la máquina de estados se prueba como antes.
-DWELL_MODE = {"pointer_mode": "hybrid", "hybrid_jump_px": 1, "hybrid_jump_ms": 0, "hybrid_settle_ms": 0}
+# dwell_still_px = 50 conserva el radio de antes para probar la máquina de estados con jitter.
+DWELL_MODE = {"pointer_mode": "hybrid", "hybrid_jump_px": 1, "hybrid_jump_ms": 0, "hybrid_settle_ms": 0,
+              "dwell_still_px": 50}
 
 
 class Base(unittest.TestCase):
@@ -557,18 +559,42 @@ class TestHybridPointer(Base):
         start = self.ctl.screen_pos()
         snap = self.look(1.0, 800, 500, yaw_deg=4.0)  # dentro de la zona muerta de 5°: no se mueve
         self.assertEqual((snap.x, snap.y), start)
-        snap = self.look(1.0, 800, 500, yaw_deg=7.0)  # 2° más allá: 15 px/s por grado -> ~30 px en 1 s
-        self.assertAlmostEqual(snap.x, start[0] - 30.0, delta=5.0)  # girar a su izquierda -> izquierda
+        snap = self.look(1.0, 800, 500, yaw_deg=7.0)  # 2° más allá: 22.5 px/s por grado -> ~45 px en 1 s
+        self.assertAlmostEqual(snap.x, start[0] - 45.0, delta=6.0)  # girar a su izquierda -> izquierda
         self.assertAlmostEqual(snap.y, start[1], delta=1.0)
         x1 = snap.x
         snap = self.look(1.0, 800, 500, yaw_deg=0.0)  # vuelve al centro: se queda donde lo dejó
         self.assertAlmostEqual(snap.x, x1, delta=2.0)
-        snap = self.look(1.0, 800, 500, pitch_deg=-8.0)  # sube la barbilla 3° más allá: ~45 px arriba
-        self.assertAlmostEqual(snap.y, start[1] - 45.0, delta=6.0)
+        snap = self.look(1.0, 800, 500, pitch_deg=-8.0)  # sube la barbilla 3° más allá: ~67 px arriba
+        self.assertAlmostEqual(snap.y, start[1] - 67.5, delta=8.0)
         self.cfg["head_speed_px_s_per_deg"] = 30.0  # la sensibilidad se aplica en vivo
         y1 = snap.y
         snap = self.look(1.0, 800, 500, pitch_deg=-8.0)
         self.assertAlmostEqual(snap.y, y1 - 90.0, delta=6.0)
+
+    def test_dwell_only_with_the_cursor_completely_still(self):
+        self.cfg["dwell_hold_ms"] = 1000
+        self.look(1.0, 800, 500)
+        # la cabeza mueve el cursor despacio (fuera de la zona muerta): el dwell no avanza
+        snap = self.look(1.5, 800, 500, yaw_deg=6.0)
+        self.assertNotEqual(snap.state, STATE_HOLD)
+        self.assertNotIn("down", self.mouse.names())
+        # 2° más allá durante 0.3 s: el cursor se mueve ~13 px (> dwell_still_px = 6) y reinicia el dwell
+        self.look(0.6, 800, 500)
+        self.look(0.3, 800, 500, yaw_deg=7.0)
+        snap = self.look(0.8, 800, 500)  # quieto de nuevo, pero menos que dwell_hold_ms
+        self.assertNotIn("down", self.mouse.names())
+        snap = self.look(0.4, 800, 500)  # completamente quieto 1.2 s: ahora sí
+        self.assertEqual(snap.state, STATE_HOLD)
+        self.assertEqual(self.mouse.names(), ["down"])
+
+    def test_no_dwell_while_following_a_gaze_jump(self):
+        self.cfg["dwell_hold_ms"] = 800
+        self.cfg["hybrid_settle_ms"] = 1000  # sigue a la mirada 1 s tras el salto
+        snap = self.look(0.9, 800, 500)  # aún siguiendo a la mirada (aunque esté quieta)
+        self.assertNotEqual(snap.state, STATE_DWELL)
+        snap = self.look(1.0, 800, 500)
+        self.assertEqual(self.mouse.names(), ["down"])  # anclado y quieto: dwell normal
 
     def test_no_gaze_jump_while_head_is_steering(self):
         self.look(1.0, 800, 500)

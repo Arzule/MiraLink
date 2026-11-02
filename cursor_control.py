@@ -26,7 +26,9 @@ blink_click_ms, en 2 s lo alternan en vivo: mode_blinks / mode_blink_window_ms, 
   afinar). Girar hacia la izquierda lo lleva a la izquierda y subir la barbilla, hacia arriba. Con la
   cabeza fuera de la zona muerta no hay saltos de la mirada (girarla desplaza la mirada estimada
   ~30-45 px/°). El salto se mide contra el punto donde aterrizó la mirada, no contra el cursor. Solo en
-  este modo hay dwell -> hold.
+  este modo hay dwell -> hold, y solo con el cursor completamente quieto: si se mueve más de
+  dwell_still_px, si la cabeza está fuera de la zona muerta o mientras sigue a la mirada tras un salto,
+  el dwell vuelve a empezar (antes un movimiento corto dentro de dwell_radius_px no lo reiniciaba).
 
 Reposo: cerrar los ojos >= sleep_close_ms (2 s, más que cualquier umbral de clic) desactiva el cursor
 (no se mueve, no hace clic ni dwell; la cámara sigue). En reposo, cerrarlos >= wake_close_ms (1 s) lo
@@ -731,8 +733,13 @@ class CursorController:
             if self._anchor is not None:
                 self._dwell_start += dt  # el reloj del dwell se detiene mientras no hay mirada fiable
             return
-        radius = float(self._cfg("dwell_radius_px"))
         p = self.display  # el dwell se mide sobre la posición que ve el usuario
+        if self._following or self._joystick_active:  # el cursor se está moviendo: no hay dwell
+            self._anchor = p
+            self._dwell_start = ts
+            self.state = STATE_IDLE
+            return
+        radius = float(self._cfg("dwell_still_px"))
         if self._anchor is None or math.hypot(p[0] - self._anchor[0], p[1] - self._anchor[1]) > radius:
             self._anchor = p
             self._dwell_start = ts
