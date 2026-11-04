@@ -161,6 +161,26 @@ class TestCalibrationDialog(UITestBase):
         self.assertEqual(dlg.camera_combo.itemText(dlg.camera_combo.currentIndex()), "Cámara 3")
         dlg.close()
 
+    def test_cameras_listed_with_their_names(self):
+        dlg = self.make_dialog(camera_lister=lambda: [(0, "USB2.0 HD UVC WebCam"), (1, "Cámara virtual")])
+        dlg.show()
+        self.pump()
+        self.assertEqual([dlg.camera_combo.itemText(i) for i in range(dlg.camera_combo.count())],
+                         ["Cámara 0: USB2.0 HD UVC WebCam", "Cámara 1: Cámara virtual"])
+        self.assertEqual(dlg.current_camera_index(), 0)
+        dlg.close()
+
+    def test_default_lister_never_opens_cameras(self):
+        from unittest import mock
+
+        import calibration_ui as cui
+        import eye_tracker
+
+        with mock.patch.object(eye_tracker, "list_cameras", side_effect=AssertionError("no debe sondear")), \
+                mock.patch.object(eye_tracker, "list_camera_devices", return_value=[(0, "Cam")]) as listed:
+            self.assertEqual(cui.default_camera_lister(), [(0, "Cam")])
+        listed.assert_called_once()
+
     def test_badge_and_hints_follow_frames(self):
         dlg = self.make_dialog()
         dlg.show()

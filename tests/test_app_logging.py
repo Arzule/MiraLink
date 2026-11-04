@@ -42,6 +42,27 @@ class TestAppLogging(unittest.TestCase):
                     h.close()
                     self.root.removeHandler(h)
 
+    def test_native_crashes_go_to_crash_log(self):
+        import faulthandler
+
+        with tempfile.TemporaryDirectory() as d:
+            crash = os.path.join(d, "miralink_crash.log")
+            old = app_logging._crash_file
+            app_logging._crash_file = None
+            try:
+                app_logging._enable_faulthandler(crash)
+                self.assertTrue(faulthandler.is_enabled())
+                faulthandler.dump_traceback(file=app_logging._crash_file)  # lo que se escribiría en un fallo
+                app_logging._crash_file.flush()
+                with open(crash, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("MiraLink iniciado", text)
+                self.assertIn("test_native_crashes_go_to_crash_log", text)
+            finally:
+                faulthandler.disable()
+                app_logging._crash_file.close()
+                app_logging._crash_file = old
+
     def test_uncaught_exception_is_reported_visibly(self):
         shown = []
         app_logging.set_error_reporter(lambda title, detail: shown.append((title, detail)))

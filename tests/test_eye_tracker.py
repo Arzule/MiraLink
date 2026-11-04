@@ -254,6 +254,24 @@ class TestPipelineAndInfra(unittest.TestCase):
         self.assertEqual(len(opened), 5)
         self.assertTrue(all(c.released for c in opened))
 
+    def test_list_camera_devices_names_without_opening(self):
+        from eye_tracker import list_camera_devices
+
+        class Dev:
+            def __init__(self, name):
+                self.name = name
+
+            def description(self):
+                return self.name
+
+        found = list_camera_devices(lambda: [Dev("USB2.0 HD UVC WebCam"), Dev("  ")])
+        self.assertEqual(found, [(0, "USB2.0 HD UVC WebCam"), (1, "Cámara 1")])
+
+        def broken():
+            raise RuntimeError("sin QtMultimedia")
+
+        self.assertEqual(list_camera_devices(broken), [])  # sin lista: el modal usa camera.device_index
+
     def test_missing_model_raises_clear_error(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "no_existe.task")

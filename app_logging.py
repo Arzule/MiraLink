@@ -19,6 +19,10 @@ from app_paths import data_dir
 
 LOG_DIR = os.path.join(data_dir(), "logs")  # junto al .exe en el ejecutable
 LOG_PATH = os.path.join(LOG_DIR, "miralink_debug.log")
+# Fallos nativos (en C/C++: controlador de la cámara, OpenCV, MediaPipe, ONNX Runtime) cierran el
+# programa sin excepción de Python; faulthandler deja en este archivo la pila de cada hilo.
+CRASH_PATH = os.path.join(LOG_DIR, "miralink_crash.log")
+_crash_file = None
 
 _configured = False
 _error_reporter: Optional[Callable[[str, str], None]] = None
@@ -67,8 +71,24 @@ def setup_logging(path: str = LOG_PATH, level: int = logging.DEBUG, install_hook
         sys.excepthook = _excepthook
         threading.excepthook = _thread_excepthook
         _install_qt_handler()
+        _enable_faulthandler(os.path.join(os.path.dirname(path), os.path.basename(CRASH_PATH)))
     logging.getLogger("miralink").info("=== MiraLink iniciado (log en %s) ===", path)
     return path
+
+
+def _enable_faulthandler(crash_path: str):
+    """Registra los fallos nativos en miralink_crash.log (en el .exe no hay consola donde verlos)."""
+    global _crash_file
+    import faulthandler
+
+    try:
+        if _crash_file is None:
+            _crash_file = open(crash_path, "a", encoding="utf-8")  # abierto mientras viva el programa
+            _crash_file.write("\n=== MiraLink iniciado ===\n")
+            _crash_file.flush()
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except OSError:
+        logging.getLogger("miralink").exception("No se pudo activar el registro de fallos nativos")
 
 
 def _install_qt_handler():

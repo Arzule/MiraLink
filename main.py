@@ -286,6 +286,19 @@ def run_self_test(out_path=None, show_window=True):
     check("modelo de MediaPipe", model)
     check("red del modo híbrido", gaze_net)
     check("ventana de configuración", window)
+
+    def cameras():
+        from PySide6.QtMultimedia import QMediaDevices  # debe venir empaquetado (lista sin abrir cámaras)
+        from PySide6.QtWidgets import QApplication
+
+        from eye_tracker import list_camera_devices
+
+        QApplication.instance() or QApplication([sys.argv[0]])
+        QMediaDevices.videoInputs()  # falla aquí si falta el módulo de Qt Multimedia
+        found = list_camera_devices()
+        return ", ".join(f"{i}: {name}" for i, name in found) or "ninguna conectada (no se abre ninguna)"
+
+    check("lista de cámaras", cameras)
     lines.append("RESULTADO: " + ("OK" if ok else "FALLO"))
     out_path = out_path or os.path.join(data_dir(), "miralink_selftest.txt")
     with open(out_path, "w", encoding="utf-8") as f:

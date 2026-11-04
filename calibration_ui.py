@@ -812,10 +812,11 @@ class CalibrationResultDialog(QDialog):
 
 
 # ------------------------------------------------------------- modal principal
-def default_camera_lister() -> List[int]:
-    from eye_tracker import list_cameras
+def default_camera_lister() -> List[Tuple[int, str]]:
+    """Cámaras con su nombre, sin abrirlas (ver eye_tracker.list_camera_devices)."""
+    from eye_tracker import list_camera_devices
 
-    return list_cameras()
+    return list_camera_devices()
 
 
 def default_tracker_factory(camera_index: int, camera_size=None, camera_exposure: str = "auto", gaze_model=None):
@@ -992,17 +993,24 @@ class CalibrationDialog(QDialog):
     # --------------------------------------------------------------- cámaras
     def _populate_cameras(self):
         current = int(self.config.get("camera", {}).get("device_index", 0))
+        logger.info("Modal: listando cámaras")
         try:
-            cams = list(self.camera_lister())
+            listed = list(self.camera_lister())
         except Exception:  # noqa: BLE001
-            cams = []
-        if current not in cams:
-            cams.append(current)  # se respeta camera.device_index aunque no responda al sondeo
-        cams = sorted(set(cams))
+            logger.exception("Modal: no se pudo listar las cámaras")
+            listed = []
+        # el listador devuelve índices o (índice, nombre)
+        names = {}
+        for item in listed:
+            index, name = (item if isinstance(item, tuple) else (item, ""))
+            names[int(index)] = name
+        if current not in names:
+            names[current] = ""  # se respeta camera.device_index aunque no aparezca en la lista
+        cams = sorted(names)
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
         for i in cams:
-            self.camera_combo.addItem(f"Cámara {i}", i)
+            self.camera_combo.addItem(f"Cámara {i}: {names[i]}" if names[i] else f"Cámara {i}", i)
         self.camera_combo.setCurrentIndex(cams.index(current))
         self.camera_combo.blockSignals(False)
         self._cameras_loaded = True

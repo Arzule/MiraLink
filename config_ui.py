@@ -465,6 +465,7 @@ class ConfigWindow(QMainWindow):
             return
         self._stop_control()  # la cámara no puede compartirse con la sesión de control
         dialog = self.calibration_dialog_factory()
+        logger.info("Modal de calibración creado")
         dialog.camera_selected.connect(self._on_camera_selected)
         dialog.finished.connect(self._on_calibration_finished)
         self.calibration_dialog = dialog

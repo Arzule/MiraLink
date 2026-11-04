@@ -35,6 +35,7 @@ a = Analysis(
         "gaze_session",
         "app_logging",
         "help_ui",
+        "PySide6.QtMultimedia",  # lista de cámaras sin abrirlas (eye_tracker.list_camera_devices)
         "scripts.download_model",
         "win32gui",
     ],

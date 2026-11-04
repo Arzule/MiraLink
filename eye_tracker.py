@@ -466,8 +466,10 @@ class CameraSource:
 
     def _open_capture(self, cv2, size: Tuple[int, int], mjpg: bool):
         for name, api in self._apis(cv2):
+            logger.info("Cámara %s: abriendo con %s a %dx%d", self.index, name, *size)
             cap = cv2.VideoCapture(self.index, api)
             if not cap.isOpened():
+                logger.info("Cámara %s: %s no la abrió", self.index, name)
                 cap.release()
                 continue
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
@@ -699,10 +701,35 @@ class CameraSource:
             self._cap = None
 
 
-def list_cameras(max_index: int = 5, opener: Optional[Callable] = None) -> List[int]:
-    """Sondea los índices 0..max_index y devuelve los que abren una cámara.
+def list_camera_devices(devices_fn: Optional[Callable] = None) -> List[Tuple[int, str]]:
+    """Cámaras de video según Windows, SIN abrirlas: [(índice, nombre)].
 
-    `opener(index)` debe devolver un objeto con isOpened() y release(); por defecto usa OpenCV.
+    Usa QMediaDevices de Qt, que enumera con Media Foundation, el mismo orden de índices que usa
+    OpenCV con Media Foundation (la API con la que se abre la cámara). Antes se abría cada índice con
+    DirectShow para saber si existía: en algunos equipos ese sondeo cerraba la aplicación sin ningún
+    error (fallo nativo de un controlador, p. ej. una cámara virtual o la infrarroja de Windows Hello).
+    Si Qt no puede listar, devuelve [] (el modal usa entonces camera.device_index).
+    `devices_fn()` devuelve objetos con description(); por defecto QMediaDevices.videoInputs.
+    """
+    try:
+        if devices_fn is None:
+            from PySide6.QtMultimedia import QMediaDevices
+
+            devices_fn = QMediaDevices.videoInputs
+        devices = list(devices_fn())
+    except Exception:  # noqa: BLE001 - sin lista se usa el índice configurado
+        logger.exception("No se pudo listar las cámaras")
+        return []
+    found = [(i, (d.description() or "").strip() or f"Cámara {i}") for i, d in enumerate(devices)]
+    logger.info("Cámaras encontradas (sin abrirlas): %s", found or "ninguna")
+    return found
+
+
+def list_cameras(max_index: int = 5, opener: Optional[Callable] = None) -> List[int]:
+    """Sondea los índices 0..max_index abriéndolos y devuelve los que abren una cámara.
+
+    La aplicación ya no la usa (ver list_camera_devices: abrir cámaras para sondear puede cerrar el
+    programa en algunos equipos). `opener(index)` devuelve un objeto con isOpened() y release().
     """
     if opener is None:
         import cv2
